@@ -1,0 +1,10 @@
+#!/bin/sh
+# Debian 安装后脚本：建立 /usr/bin 命令软链，指向 /opt 下的程序目录。
+set -e
+
+LINK=/usr/bin/pure-clash
+TARGET=/opt/pure-clash/pure-clash
+
+if [ "$1" = configure ] && [ ! -e "$LINK" ]; then
+    ln -s "$TARGET" "$LINK"
+fi

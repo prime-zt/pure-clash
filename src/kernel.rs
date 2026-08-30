@@ -1,4 +1,6 @@
-#[cfg(debug_assertions)]
+// `Path` 的使用方：unix 平台的 ensure_executable（release 也编译）与
+// debug 构建的开发目录回退逻辑；Windows release 不需要。
+#[cfg(any(debug_assertions, unix))]
 use std::path::Path;
 use std::path::PathBuf;
 

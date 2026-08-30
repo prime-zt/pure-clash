@@ -5,6 +5,46 @@ edition = "2024"
 description = "A lightweight Mihomo desktop client built with Rust and Zed GPUI"
 license = "GPL-3.0"
 
+# Linux 发行包布局：程序与随包内核整体放在 /opt/pure-clash，保证内核目录
+# 相对可执行文件解析；/usr/bin 软链由维护脚本创建。随包内核版本目录升级时
+# 需同步更新两段 assets 中的 kernel/1.19.30 路径（唯一来源仍是 manifest）。
+[package.metadata.deb]
+maintainer = "Ztion <work@ztion.cn>"
+copyright = "2026 Ztion"
+depends = "$auto"
+section = "net"
+priority = "optional"
+extended-description = """\
+Pure Clash is a lightweight native Mihomo desktop client built with \
+Rust and Zed GPUI. It manages configuration subscriptions, proxy \
+groups, connections and live traffic, and safely controls a standalone \
+Mihomo kernel with system proxy and TUN support."""
+assets = [
+    ["target/release/pure-clash", "opt/pure-clash/", "755"],
+    ["kernel/1.19.30/pc-mihomo", "opt/pure-clash/kernel/1.19.30/", "755"],
+    ["kernel/1.19.30/LICENSE", "opt/pure-clash/kernel/1.19.30/", "644"],
+    ["kernel/1.19.30/NOTICE.md", "opt/pure-clash/kernel/1.19.30/", "644"],
+    ["kernel/1.19.30/manifest.json", "opt/pure-clash/kernel/1.19.30/", "644"],
+    ["packaging/linux/pure-clash.desktop", "usr/share/applications/", "644"],
+    ["packaging/linux/pure-clash.png", "usr/share/icons/hicolor/64x64/apps/", "644"],
+]
+maintainer-scripts = "packaging/linux/deb"
+
+[package.metadata.generate-rpm]
+summary = "A lightweight native Mihomo desktop client built with Rust and Zed GPUI"
+maintainer = "Ztion <work@ztion.cn>"
+post_install_script = "packaging/linux/rpm/post-install.sh"
+post_uninstall_script = "packaging/linux/rpm/post-uninstall.sh"
+assets = [
+    { source = "target/release/pure-clash", dest = "/opt/pure-clash/pure-clash", mode = "755" },
+    { source = "kernel/1.19.30/pc-mihomo", dest = "/opt/pure-clash/kernel/1.19.30/pc-mihomo", mode = "755" },
+    { source = "kernel/1.19.30/LICENSE", dest = "/opt/pure-clash/kernel/1.19.30/LICENSE", mode = "644" },
+    { source = "kernel/1.19.30/NOTICE.md", dest = "/opt/pure-clash/kernel/1.19.30/NOTICE.md", mode = "644" },
+    { source = "kernel/1.19.30/manifest.json", dest = "/opt/pure-clash/kernel/1.19.30/manifest.json", mode = "644" },
+    { source = "packaging/linux/pure-clash.desktop", dest = "/usr/share/applications/pure-clash.desktop", mode = "644" },
+    { source = "packaging/linux/pure-clash.png", dest = "/usr/share/icons/hicolor/64x64/apps/pure-clash.png", mode = "644" },
+]
+
 [dependencies]
 anyhow = "1.0"
 # 托盘事件经无界通道转交 GPUI 主线程，避免在平台回调线程里直接操作界面状态。

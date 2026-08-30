@@ -41,7 +41,7 @@ Five primary pages plus an About page: Overview (stat cards, current outbound, r
 | TUN mode | ✅ UAC + wintun | ✅ polkit + root service | Not implemented |
 | Tray | ✅ | ✅ SNI (AppIndicator extension needed on GNOME) | Not implemented |
 | Single instance | ✅ | ✅ | Not implemented |
-| Installer | ✅ NSIS per-user | Not implemented | Not implemented |
+| Installer | ✅ NSIS per-user | ✅ deb / rpm / AppImage | Not implemented |
 
 Linux uses XDG directories (`~/.config/pure-clash`, `~/.local/share/pure-clash`); Wayland gets client-side decorations with rounded corners, shadow and resize edges, and X11 falls back to system decorations.
 
@@ -70,13 +70,15 @@ The pinned kernel is committed with the source (`kernel/<version>/pc-mihomo.exe`
 
 On first launch the app initializes `config/` and `data/` on the current platform, including a DIRECT-only default config and a randomly generated controller secret.
 
-### Windows installer
+### Packages and releases
 
 ```powershell
 pwsh -NoLogo -NoProfile -File .\packaging\windows\build-installer.ps1
 ```
 
 The output is `dist\pure-clash-<version>-windows-x64-setup.exe`, a per-user installation into `%LOCALAPPDATA%\Programs\Pure Clash` that never asks for administrator rights.
+
+Linux deb / rpm / AppImage and the Windows NSIS installer are built automatically by GitHub Actions when a `v*` tag is pushed, then published to [Releases](https://github.com/prime-zt/pure-clash/releases); the tag version must match the Cargo package version. deb/rpm install into `/opt/pure-clash` and create a `/usr/bin/pure-clash` symlink, the AppImage runs as-is, and all three bundle the kernel and license files.
 
 ### Development checks
 
@@ -106,7 +108,7 @@ See the [technical design document](docs/pure-clash-architecture.md) for the ful
 
 - Rules page and log/memory monitoring (controller `/rules`, `/logs`, `/memory`)
 - Local YAML profile import (currently URL subscriptions only)
-- Linux credential storage, system-level installer and system proxy for other desktops such as KDE
+- Linux credential storage and system proxy for other desktops such as KDE
 - Full macOS support (kernel guarding, window behavior, TUN boundary)
 - Code signing and an update channel
 

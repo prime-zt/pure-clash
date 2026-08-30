@@ -41,7 +41,7 @@ Pure Clash 用清晰、快速的原生界面管理配置订阅、代理组、连
 | TUN 模式 | ✅ UAC + wintun | ✅ polkit + root 服务 | 未实现 |
 | 托盘 | ✅ | ✅ SNI（GNOME 需 AppIndicator 扩展） | 未实现 |
 | 单实例锁 | ✅ | ✅ | 未实现 |
-| 安装器 | ✅ NSIS per-user | 未实现 | 未实现 |
+| 安装器 | ✅ NSIS per-user | ✅ deb / rpm / AppImage | 未实现 |
 
 Linux 使用 XDG 标准目录（`~/.config/pure-clash`、`~/.local/share/pure-clash`）；Wayland 使用带圆角、阴影与缩放边缘的客户端装饰，X11 回退系统装饰。
 
@@ -70,13 +70,15 @@ cargo run
 
 首次启动会在对应平台目录初始化 `config/` 与 `data/`，包括只含 `DIRECT` 节点的默认配置与随机生成的 controller secret。
 
-### Windows 安装包
+### 安装包与发布
 
 ```powershell
 pwsh -NoLogo -NoProfile -File .\packaging\windows\build-installer.ps1
 ```
 
 产物为 `dist\pure-clash-<版本>-windows-x64-setup.exe`，per-user 安装到 `%LOCALAPPDATA%\Programs\Pure Clash`，不请求管理员权限。
+
+Linux 提供 deb / rpm / AppImage，Windows 提供 NSIS 安装包：推送 `v*` 标签时由 GitHub Actions 自动构建并发布到 [Releases](https://github.com/prime-zt/pure-clash/releases)，标签版本必须与 Cargo 包版本一致。deb/rpm 安装到 `/opt/pure-clash` 并创建 `/usr/bin/pure-clash` 软链，AppImage 开箱即用，三者均随包内核与许可证文件。
 
 ### 开发验证
 
@@ -106,7 +108,7 @@ GPUI 仍处于 pre-1.0 阶段，本项目固定使用 `0.2.2`；升级前需核�
 
 - 规则页与日志/内存监控（controller `/rules`、`/logs`、`/memory`）
 - 本地 YAML 配置文件导入（当前仅支持 URL 订阅）
-- Linux 凭据存储、系统级安装器与 KDE 等其他桌面的系统代理
+- Linux 凭据存储与 KDE 等其他桌面的系统代理
 - macOS 完整支持（内核守护、窗口行为、TUN 边界）
 - 代码签名与更新通道
 

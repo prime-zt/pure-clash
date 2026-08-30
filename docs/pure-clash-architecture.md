@@ -276,7 +276,7 @@ targets.<os-arch>：
 - 与二进制完全对应的源码获取 URL或书面提供方式；
 - Pure Clash 与 Mihomo 独立许可证和非官方关系说明。
 
-`packaging/windows/build-installer.ps1` 会在构建前检查内核、许可证与 manifest 是否齐全，再将它们交给 NSIS 打包。卸载时删除随包内核，但保留用户的 `config/` 和 `data/`。Linux 按便携式布局直接使用源码树内的 `kernel/<版本>/pc-mihomo`，正式发行包的供应链流程在发行方案确定后补充。
+`packaging/windows/build-installer.ps1` 会在构建前检查内核、许可证与 manifest 是否齐全，再将它们交给 NSIS 打包。卸载时删除随包内核，但保留用户的 `config/` 和 `data/`。Linux 按便携式布局直接使用源码树内的 `kernel/<版本>/pc-mihomo`；发布流水线在推送 `v*` 标签时构建 deb/rpm（安装到 `/opt/pure-clash` 并软链 `/usr/bin`）与 AppImage，均随包内核、许可证与 manifest，供应链校验与 Windows 共用同一份 manifest。
 
 ## 8. 错误与隐私模型
 

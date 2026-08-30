@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Pure Clash
+Name[zh_CN]=Pure Clash
+Comment=A lightweight native Mihomo desktop client
+Comment[zh_CN]=轻量原生 Mihomo 桌面客户端
+Exec=pure-clash
+Icon=pure-clash
+Categories=Network;
+Terminal=false
+StartupWMClass=pure-clash

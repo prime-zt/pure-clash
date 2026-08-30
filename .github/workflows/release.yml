@@ -1,0 +1,107 @@
+# 版本发布流水线：推送 v* 标签触发，构建 Windows NSIS 安装包与
+# Linux deb / rpm / AppImage，并发布到 GitHub Release。
+#
+# 标签版本必须与 Cargo 包版本一致（如 v0.1.0 ↔ 0.1.0），产物文件名
+# 以 Cargo 版本为准，不一致时流水线直接失败，避免发布名实不符的产物。
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  version-guard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: 校验标签与 Cargo 版本一致
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          cargo_version="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "pure-clash") | .version')"
+          echo "标签版本：$tag / Cargo 版本：$cargo_version"
+          if [ "$tag" != "$cargo_version" ]; then
+            echo "::error::标签 v$tag 与 Cargo.toml 版本 $cargo_version 不一致；请先更新版本号再打标签"
+            exit 1
+          fi
+
+  windows:
+    runs-on: windows-latest
+    needs: version-guard
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      # 脚本自包含：cargo build --release、读取 Cargo 版本、定位预装 NSIS、
+      # 校验内核 manifest 哈希并打包许可证文件。
+      - name: 构建 NSIS 安装包
+        shell: pwsh
+        run: ./packaging/windows/build-installer.ps1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-installer
+          path: dist/*.exe
+          if-no-files-found: error
+
+  linux:
+    runs-on: ubuntu-22.04
+    needs: version-guard
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      # gpui 构建期需要链接 wayland / freetype / X11；22.04 的 glibc 2.35
+      # 基线让产物兼容更老的发行版。
+      - name: 安装构建依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwayland-dev libxkbcommon-dev libfreetype6-dev \
+            libfontconfig1-dev libx11-dev libudev-dev
+      - name: 构建内核与客户端
+        run: cargo build --release
+      - name: 安装打包工具
+        run: cargo install --locked cargo-deb cargo-generate-rpm
+      - name: 构建 deb
+        run: cargo deb --no-build
+      - name: 构建 rpm
+        run: cargo generate-rpm
+      - name: 构建 AppImage
+        run: |
+          curl -sL -o linuxdeploy \
+            https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
+          chmod +x linuxdeploy
+          export PATH="$PWD:$PATH"
+          version="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "pure-clash") | .version')"
+          ./packaging/linux/build-appimage.sh "$version"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-packages
+          path: |
+            target/debian/*.deb
+            target/generate-rpm/*.rpm
+            target/appimage/*.AppImage
+          if-no-files-found: error
+
+  release:
+    runs-on: ubuntu-latest
+    needs: [windows, linux]
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: "{windows-installer,linux-packages}"
+          merge-multiple: true
+          path: release
+      - name: 发布产物清单
+        run: ls -la release/
+      - uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            release/*.exe
+            release/*.deb
+            release/*.rpm
+            release/*.AppImage

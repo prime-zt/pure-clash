@@ -35,6 +35,8 @@
 - `src/assets.rs`、`assets/icons/`：嵌入式 SVG 资源注册与本地图标；`app.svg` 是带背景的应用图标源文件。
 - `build.rs`、`src/kernel.rs`、`kernel/{版本}/`：从随包 manifest 注入默认内核版本，并按启动配置解析运行时路径。
 - `packaging/windows/`：Windows 专属的 NSIS 安装器定义和 PowerShell 7 打包入口。
+- `packaging/linux/`：Linux 发行包资源（desktop 条目、图标、deb 维护脚本、rpm scriptlet、AppImage 组装脚本）；deb/rpm 元数据在 `Cargo.toml` 的 `package.metadata.deb` / `generate-rpm`，安装布局为 `/opt/pure-clash` + `/usr/bin` 软链，内核版本目录升级时同步两段 assets。
+- `.github/workflows/release.yml`：推送 `v*` 标签触发的发布流水线，构建 Windows NSIS 与 Linux deb/rpm/AppImage 并发布 GitHub Release；标签版本与 Cargo 版本不一致时直接失败。
 - `docs/pure-clash-architecture.md`：Mihomo 进程、REST/WebSocket 控制、安全、配置和产品化技术基线。
 
 ## 技术栈、目录与约定
@@ -76,7 +78,7 @@
 - 当前用户会话只允许一个 Pure Clash 实例：Windows 用 `Local\\` 命名 Mutex + 自动重置 Event，Linux 用抽象命名空间 Unix socket（按 UID 隔离多用户，内核保证 bind 原子性，进程退出自动释放）；后续进程通知首实例后于配置初始化和 GPUI 启动前退出，首实例把通知转交 GPUI 主线程恢复并激活主窗口。macOS 尚未实现对应单实例锁。
 - GPUI 0.2.2 的 `svg()` 元素按单色 alpha mask 绘制且必须设置 `text_color`；带背景色的 `app.svg` 在标题栏中必须使用 `img()`，其他单色界面图标继续使用 `svg()`。
 - Windows release 使用 GUI 子系统，debug 保留控制台；NSIS 继续采用 per-user 安装模型。TUN 等提权能力不得借此安装器静默获取管理员权限。
-- 当前实现的平台能力：Windows x64 支持内核启停、系统代理、TUN、托盘与单实例；Linux x64 支持内核启停（异常退出由 pdeathsig 回收）、GNOME/Cinnamon `gsettings` 系统代理、基于 polkit 一次授权 root systemd 服务的 TUN（对齐 Clash Verge Rev 的服务模型）、SNI 托盘（GNOME 需 AppIndicator 扩展）与单实例，其中 Linux TUN 已在 Fedora 44 x64（Wayland/GNOME）完成真实路由/DNS 授权验证，其他桌面与发行版未经实测。Linux 凭据存储和安装器仍未实现；macOS 只完成目录、资源路径与窗口装饰边界预留。
+- 当前实现的平台能力：Windows x64 支持内核启停、系统代理、TUN、托盘与单实例；Linux x64 支持内核启停（异常退出由 pdeathsig 回收）、GNOME/Cinnamon `gsettings` 系统代理、基于 polkit 一次授权 root systemd 服务的 TUN（对齐 Clash Verge Rev 的服务模型）、SNI 托盘（GNOME 需 AppIndicator 扩展）与单实例，其中 Linux TUN 已在 Fedora 44 x64（Wayland/GNOME）完成真实路由/DNS 授权验证，其他桌面与发行版未经实测。Linux 凭据存储仍未实现，deb/rpm/AppImage 由 GitHub Actions 在推送标签时构建并发布 Release；macOS 只完成目录、资源路径与窗口装饰边界预留。
 - 页面上的内核启动/停止已接入真实 Mihomo 进程；启动固定使用 `config/mihomo/runtime.yaml` 和 `data/mihomo/`，并先以同一内核执行 `-t`。应用启动时按 `app.json` 记录的激活配置自动拉起内核，激活/切换配置即时持久化、下次启动原样恢复；启动失败只在界面提示，不阻断打开。runtime.yaml 由客户端本地基线 `config/mihomo/local.yaml`（含随机 controller secret，禁止写入日志）与激活的配置文件合并生成，端口等本机字段一律以本地基线为准，订阅不得开启 TUN。配置页首行是内置默认配置（仅 `DIRECT` 出站，`active_profile` 为空即选中态，点击经同一 `-t` 链路切回），其下支持 URL 订阅下载（结构预检 + 内核 `-t` 双重校验）、更新、删除与激活，激活/切换配置会真实重启内核；代理页与运行模式切换通过仅回环的 external controller（`PATCH /configs`、`GET/PUT /proxies`）真实生效，节点/分组延迟测试用 `GET /proxies/{name}/delay` 与 `GET /group/{name}/delay`（gstatic 204 探测、5 秒超时，手动结果覆盖 /proxies 历史值，失败显示超时）。连接与流量为真实实现：应用常驻任务每秒轮询 `GET /connections`，差分累计字节数得到实时网速，连接列表支持单条与全部关闭（`DELETE /connections[/{id}]`），渲染上限 200 行；响应中 `connections` 可为 null、失败延迟记为 0，解析时均已兜底，接口字段以官方文档和内核实测为准。设置页展示真实 controller 地址；系统代理与 TUN 开关为真实实现，标题栏以同款徽标展示两者开关状态。
 - 页面借鉴 Clash Verge Rev 的功能分区，但采用独立的紧凑 GPUI 原生设计；页面保留内核开关、模式切换、代理节点与延迟测试、连接、配置和系统集成状态。
 - GPUI 仍处于 pre-1.0 阶段，升级前必须按目标版本官方示例核对 API。

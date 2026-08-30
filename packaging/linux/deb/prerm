@@ -1,0 +1,9 @@
+#!/bin/sh
+# Debian 卸载前脚本：仅删除本包创建的命令软链，不动 /opt 程序目录。
+set -e
+
+LINK=/usr/bin/pure-clash
+
+if [ "$1" = remove ] && [ -L "$LINK" ]; then
+    rm -f "$LINK"
+fi
