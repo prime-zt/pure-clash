@@ -104,8 +104,9 @@ jobs:
       - uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
+          # artifact 下载后保留 debian/ 等子目录，glob 需要跨层级匹配。
           files: |
-            release/*.exe
-            release/*.deb
-            release/*.rpm
-            release/*.AppImage
+            release/**/*.exe
+            release/**/*.deb
+            release/**/*.rpm
+            release/**/*.AppImage
