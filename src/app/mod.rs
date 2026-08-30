@@ -231,6 +231,8 @@ pub(crate) struct PureClash {
     server_visible: bool,
     /// 关于页检查更新是否进行中。
     update_checking: bool,
+    /// 检查发现新版本时置位；界面用它强调更新提示。
+    update_available: bool,
     /// 关于页检查更新的结果文案；None 表示尚未检查。
     update_status: Option<SharedString>,
     /// 平台托盘句柄必须与应用状态同生命周期持有，释放后系统会移除图标。
@@ -321,6 +323,7 @@ impl PureClash {
             node_endpoints: std::collections::HashMap::new(),
             server_visible: false,
             update_checking: false,
+            update_available: false,
             update_status: None,
             system_tray: None,
         };
@@ -388,17 +391,24 @@ impl PureClash {
 
     fn select_page(&mut self, page: Page, cx: &mut Context<Self>) {
         self.page = page;
+        // 进入关于页时自动检查一次更新；本会话已有结果或正在检查则跳过，
+        // 手动按钮随时可以重新检查。
+        if page == Page::About && self.update_status.is_none() && !self.update_checking {
+            self.check_for_updates(cx);
+        }
         cx.notify();
     }
 
     /// 关于页检查更新：查询仓库最新发布版本并与当前版本比较。
     ///
-    /// 仓库地址见 about 模块常量；未发布 release 时按失败原因展示。
+    /// 进入关于页自动触发一次，也可通过按钮手动重查；不做自动安装，
+    /// 发现新版本时仅在关于页提示并引导用户前往仓库。
     fn check_for_updates(&mut self, cx: &mut Context<Self>) {
         if self.update_checking {
             return;
         }
         self.update_checking = true;
+        self.update_available = false;
         self.update_status = None;
         cx.notify();
         cx.spawn(async move |this, cx| {
@@ -409,15 +419,17 @@ impl PureClash {
             let _ = this.update(cx, |this, cx| {
                 this.update_checking = false;
                 this.update_status = Some(match result {
-                    Ok(latest) => {
-                        if latest == Self::CURRENT_VERSION {
-                            tr("about.up_to_date")
-                        } else {
+                    Ok(Some(latest)) => {
+                        if crate::app::about::is_newer_version(&latest, Self::CURRENT_VERSION) {
+                            this.update_available = true;
                             SharedString::from(
                                 t!("about.new_version", version = latest).into_owned(),
                             )
+                        } else {
+                            tr("about.up_to_date")
                         }
                     }
+                    Ok(None) => tr("about.no_release"),
                     Err(error) => SharedString::from(
                         t!(
                             "about.check_failed",

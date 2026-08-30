@@ -8,9 +8,9 @@ use crate::assets::{ICON_APP, ICON_GIT_BRANCH};
 use crate::theme::{FontWeightExt, Palette};
 
 /// 源码仓库地址；发布仓库变动时请同步更新 [`RELEASES_API_URL`]。
-const SOURCE_CODE_URL: &str = "https://github.com/ztion/pure-clash";
+const SOURCE_CODE_URL: &str = "https://github.com/prime-zt/pure-clash";
 /// 最新版本查询端点（GitHub Releases API）。
-const RELEASES_API_URL: &str = "https://api.github.com/repos/ztion/pure-clash/releases/latest";
+const RELEASES_API_URL: &str = "https://api.github.com/repos/prime-zt/pure-clash/releases/latest";
 
 /// 开源组件清单：(名称, 在项目中的用途, 许可证)。
 const OPEN_SOURCE_COMPONENTS: &[(&str, &str, &str)] = &[
@@ -137,11 +137,19 @@ pub(super) fn render_about(
                                 .child(tr("about.checking"))
                         }))
                         .children(app.update_status.as_ref().map(|status| {
+                            // 发现新版本时用主题色强调，其余结果保持弱化展示。
+                            let highlighted = app.update_available;
                             div()
                                 .min_w_0()
                                 .truncate()
                                 .text_xs()
-                                .text_color(palette.muted)
+                                .map(|text| {
+                                    if highlighted {
+                                        text.font_medium().text_color(palette.accent)
+                                    } else {
+                                        text.text_color(palette.muted)
+                                    }
+                                })
                                 .child(status.clone())
                         })),
                 ),
@@ -219,22 +227,29 @@ fn open_source_code_url() {
     }
 }
 
-/// 查询仓库最新发布版本号（去除 tag 前缀 v/V）；失败时返回错误供界面展示。
-pub(super) fn latest_release_version() -> anyhow::Result<String> {
-    use anyhow::{Context, anyhow, bail};
+/// 查询仓库最新发布版本号（去除 tag 前缀 v/V）。
+///
+/// 返回 `Ok(None)` 表示仓库还没有任何已发布版本（GitHub API 404）；
+/// 其余失败以错误返回，供界面展示原因。
+pub(super) fn latest_release_version() -> anyhow::Result<Option<String>> {
+    use anyhow::{Context, anyhow};
 
     let agent = ureq::AgentBuilder::new()
         .timeout(std::time::Duration::from_secs(10))
         .build();
-    let value: serde_json::Value = agent
+    let value: serde_json::Value = match agent
         .get(RELEASES_API_URL)
         .set("User-Agent", "pure-clash/update-check")
         .call()
-        .map_err(|error| anyhow!("{error}"))
-        .context("无法连接更新源")?
-        .into_json()
-        .map_err(|error| anyhow!("{error}"))
-        .context("更新源响应格式无效")?;
+    {
+        Ok(response) => response
+            .into_json()
+            .map_err(|error| anyhow!("{error}"))
+            .context("更新源响应格式无效")?,
+        // 仓库尚无 release 时 GitHub 返回 404，属于正常情况而非故障。
+        Err(ureq::Error::Status(404, _)) => return Ok(None),
+        Err(error) => return Err(anyhow!("{error}")).context("无法连接更新源"),
+    };
     let tag = value
         .get("tag_name")
         .and_then(serde_json::Value::as_str)
@@ -242,7 +257,51 @@ pub(super) fn latest_release_version() -> anyhow::Result<String> {
         .trim_start_matches(['v', 'V'])
         .to_owned();
     if tag.is_empty() {
-        bail!("更新源返回了空版本号");
+        anyhow::bail!("更新源返回了空版本号");
     }
-    Ok(tag)
+    Ok(Some(tag))
+}
+
+/// 判断 `latest` 是否严格新于 `current`；版本号按数值逐段比较，
+/// 段数不足补零，非数字后缀（如 `-rc1`）截断忽略。
+pub(super) fn is_newer_version(latest: &str, current: &str) -> bool {
+    fn components(version: &str) -> Vec<u64> {
+        version
+            .split('.')
+            .map(|part| {
+                part.chars()
+                    .take_while(char::is_ascii_digit)
+                    .collect::<String>()
+                    .parse()
+                    .unwrap_or(0)
+            })
+            .collect()
+    }
+
+    let mut latest = components(latest);
+    let mut current = components(current);
+    let length = latest.len().max(current.len());
+    latest.resize(length, 0);
+    current.resize(length, 0);
+    latest > current
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn newer_version_compares_numerically_per_segment() {
+        assert!(is_newer_version("0.2.0", "0.1.0"));
+        assert!(is_newer_version("0.1.10", "0.1.9"));
+        assert!(is_newer_version("1.0.0", "0.9.9"));
+        assert!(is_newer_version("0.2", "0.1.9"));
+        // 缺失段补零、字符串前缀比较被避免（0.1.0 不小于 0.1.0-rc 视为相同段）。
+        assert!(!is_newer_version("0.1.0", "0.1.0"));
+        assert!(!is_newer_version("0.1", "0.1.0"));
+        assert!(!is_newer_version("0.0.9", "0.1.0"));
+        // 预发布后缀只取数字主体：v0.2.0-rc1 视作 0.2.0。
+        assert!(is_newer_version("0.2.0-rc1", "0.1.9"));
+        assert!(!is_newer_version("0.1.0-rc1", "0.1.0"));
+    }
 }
