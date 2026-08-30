@@ -36,8 +36,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: Swatinem/rust-cache@v2
-      # 脚本自包含：cargo build --release、读取 Cargo 版本、定位预装 NSIS、
-      # 校验内核 manifest 哈希并打包许可证文件。
+      # runner 镜像不预装 NSIS，经 Chocolatey 安装；脚本会探测默认安装目录。
+      - name: 安装 NSIS
+        run: choco install nsis -y --no-progress
+      # 脚本自包含：cargo build --release、读取 Cargo 版本、校验内核
+      # manifest 哈希并打包许可证文件。
       - name: 构建 NSIS 安装包
         shell: pwsh
         run: ./packaging/windows/build-installer.ps1
@@ -75,8 +78,9 @@ jobs:
             https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
           chmod +x linuxdeploy
           export PATH="$PWD:$PATH"
-          version="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "pure-clash") | .version')"
-          ./packaging/linux/build-appimage.sh "$version"
+          # 脚本参数是内核版本目录名（与 manifest 一致），不是包版本。
+          kernel_version="$(jq -r '.version' kernel/*/manifest.json)"
+          ./packaging/linux/build-appimage.sh "$kernel_version"
       - uses: actions/upload-artifact@v4
         with:
           name: linux-packages
