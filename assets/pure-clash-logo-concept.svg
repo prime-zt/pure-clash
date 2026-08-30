@@ -1,0 +1,32 @@
+<svg
+  xmlns="http://www.w3.org/2000/svg"
+  viewBox="0 0 256 256"
+  fill="none"
+  role="img"
+  aria-labelledby="title description"
+>
+  <title id="title">Pure Clash 猫耳 P 图标概念稿</title>
+  <desc id="description">由粗圆角线条绘制的矮宽字母 P，顶部带有两只猫耳。</desc>
+
+  <g
+    stroke="#745BFF"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  >
+    <!-- 矮宽的 P 主体：缩短下方竖线并加粗轮廓，使整体更紧凑饱满。 -->
+    <path
+      d="M64 207V80C64 59 79 49 101 49H165C199 49 222 69 222 101C222 133 199 153 165 153H64"
+      stroke-width="25"
+    />
+
+    <!-- 两只猫耳与 P 的顶部轮廓相接，保持单色线稿风格。 -->
+    <path d="M90 50L107 19L135 49" stroke-width="15" />
+    <path d="M148 49L182 19L199 63" stroke-width="15" />
+
+    <!-- 内圈用小鼻子连接三组胡须，并以 P 内部留白的视觉中心对称排布。 -->
+    <path
+      d="M135 99L143 105L151 99M143 105V112M130 105L98 96M129 113H95M130 121L101 132M156 105L188 96M157 113H191M156 121L185 132"
+      stroke-width="7"
+    />
+  </g>
+</svg>

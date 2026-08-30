@@ -1,0 +1,4 @@
+# Rust 与 NSIS 的本地构建产物不进入源码仓库。
+/target
+/dist
+*.pdb

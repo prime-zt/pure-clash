@@ -1,0 +1,18 @@
+# Pure Clash 首次启动使用的最小配置，仅暴露本机代理端口。
+mixed-port: 7890
+allow-lan: false
+bind-address: 127.0.0.1
+mode: rule
+log-level: info
+ipv6: false
+
+# `DIRECT` 是 Mihomo 内置出站；默认策略组只有这一个可选节点。
+proxies: []
+proxy-groups:
+  - name: PROXY
+    type: select
+    proxies:
+      - DIRECT
+
+rules:
+  - MATCH,PROXY

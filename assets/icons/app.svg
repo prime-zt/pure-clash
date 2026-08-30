@@ -1,0 +1,42 @@
+<svg
+  xmlns="http://www.w3.org/2000/svg"
+  viewBox="0 0 256 256"
+  fill="none"
+  role="img"
+  aria-labelledby="title description"
+>
+  <title id="title">Pure Clash 应用图标</title>
+  <desc id="description">紫色圆角背景上的白色猫耳 P 标志。</desc>
+
+  <!-- 实色圆角背景保证 Windows 小尺寸图标在明暗任务栏上都有清晰边界。 -->
+  <rect x="8" y="8" width="240" height="240" rx="58" fill="#745BFF" />
+  <rect
+    x="10"
+    y="10"
+    width="236"
+    height="236"
+    rx="56"
+    stroke="#FFFFFF"
+    stroke-opacity="0.16"
+    stroke-width="4"
+  />
+
+  <!-- 沿用确认后的猫耳 P 线稿，并留出适合 ICO 圆角裁切的安全边距。 -->
+  <g
+    transform="translate(16 18) scale(0.875)"
+    stroke="#FFFFFF"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  >
+    <path
+      d="M64 207V80C64 59 79 49 101 49H165C199 49 222 69 222 101C222 133 199 153 165 153H64"
+      stroke-width="25"
+    />
+    <path d="M90 50L107 19L135 49" stroke-width="15" />
+    <path d="M148 49L182 19L199 63" stroke-width="15" />
+    <path
+      d="M135 99L143 105L151 99M143 105V112M130 105L98 96M129 113H95M130 121L101 132M156 105L188 96M157 113H191M156 121L185 132"
+      stroke-width="7"
+    />
+  </g>
+</svg>

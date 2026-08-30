@@ -1,0 +1,61 @@
+{
+  "version": "1.19.30",
+  "source_url": "https://github.com/MetaCubeX/mihomo/tree/v1.19.30",
+  "license": "GPL-3.0",
+  "license_url": "https://raw.githubusercontent.com/MetaCubeX/mihomo/v1.19.30/LICENSE",
+  "license_sha256": "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986",
+  "targets": {
+    "windows-amd64": {
+      "platform": "windows",
+      "architecture": "amd64",
+      "build": "compatible",
+      "binary": "pc-mihomo.exe",
+      "archive": "mihomo-windows-amd64-compatible-v1.19.30.zip",
+      "archive_size": 18529108,
+      "archive_sha256": "289fde5e29d37a5b3326480590d8b3551c5bf7f8737290355c19bce74d57a563",
+      "binary_size": 50132992,
+      "binary_sha256": "6ac25fcb26afe8e1bea24b6e6e80805bf884a33232d12e2d78dfa0b6c529ac14",
+      "wintun": {
+        "version": "0.14.1",
+        "file": "wintun.dll",
+        "source_url": "https://www.wintun.net/builds/wintun-0.14.1.zip",
+        "archive_sha256": "07c256185d6ee3652e09fa55c0b673e2624b565e02c4b9091c79ca7d2f24ef51",
+        "file_size": 427552,
+        "file_sha256": "e5da8447dc2c320edc0fc52fa01885c103de8c118481f683643cacc3220dafce"
+      }
+    },
+    "linux-amd64": {
+      "platform": "linux",
+      "architecture": "amd64",
+      "build": "default",
+      "binary": "pc-mihomo",
+      "archive": "mihomo-linux-amd64-v1.19.30.gz",
+      "archive_size": 18868732,
+      "archive_sha256": "cf06ce2c7d1421bdbda14ee4a5b6046672dc35ebf8eecd8e77504ec3c0ed9a84",
+      "binary_size": 50937982,
+      "binary_sha256": "3e92df24f5e80e86b9cf9183ceb7bb575f0bd132a9dc4081dae42e80f21076ae"
+    },
+    "macos-amd64": {
+      "platform": "macos",
+      "architecture": "amd64",
+      "build": "compatible",
+      "binary": "pc-mihomo",
+      "archive": "mihomo-darwin-amd64-compatible-v1.19.30.gz",
+      "archive_size": 18300486,
+      "archive_sha256": "6e75de0732e8afabe413ff7c235e8f16226ce136672371c60787cbf9607402c5",
+      "binary_size": 49677184,
+      "binary_sha256": "30895e01ba17cc4293f9fa192c0601e91fcb812acb72a03a0286b8ffef72dadc"
+    },
+    "macos-aarch64": {
+      "platform": "macos",
+      "architecture": "aarch64",
+      "build": "default",
+      "binary": "pc-mihomo",
+      "archive": "mihomo-darwin-arm64-v1.19.30.gz",
+      "archive_size": 16805556,
+      "archive_sha256": "2c7f3a7904fa1cee291e124123e630e7b1ebd13765dd9bf26c0a28432004d9f4",
+      "binary_size": 45643538,
+      "binary_sha256": "e80c6334b4e3aae53dfbc86cddd4434cec1565a61d4483931fac2ae12fec6d30"
+    }
+  }
+}

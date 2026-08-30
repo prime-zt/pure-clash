@@ -1,0 +1,64 @@
+[package]
+name = "pure-clash"
+version = "0.1.0"
+edition = "2024"
+description = "A lightweight Mihomo desktop client built with Rust and Zed GPUI"
+license = "GPL-3.0"
+
+[dependencies]
+anyhow = "1.0"
+# 托盘事件经无界通道转交 GPUI 主线程，避免在平台回调线程里直接操作界面状态。
+async-channel = "2.5"
+gpui = "0.2.2"
+rust-i18n = "4.2.1"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+# 解析与合并 Clash YAML 配置；锁定 0.9 稳定版本。
+serde_yaml = "0.9"
+# 订阅下载与 controller REST 调用；rustls TLS，阻塞式跑在 GPUI 后台线程。
+ureq = { version = "2.10", features = ["json"] }
+# 生成配置文件随机 secret 与订阅 profile 标识。
+uuid = { version = "1.0", features = ["v4"] }
+# 文本输入组件的字素边界处理（与 gpui 官方 input 示例一致）。
+unicode-segmentation = "1.0"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+# GPUI 0.2.2 尚未提供系统托盘 API，仅在 Windows 目标引入成熟的原生托盘实现。
+tray-icon = { version = "0.24.2", default-features = false }
+# Windows 平台使用 Job Object 管理内核进程，并用命名 Mutex/Event 实现单实例；
+# 注册表与 WinINet 用于读写当前用户的系统代理设置。
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Networking_WinInet",
+    "Win32_Security",
+    "Win32_System_JobObjects",
+    "Win32_System_Registry",
+    "Win32_System_Threading",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
+# 从 GPUI Window 解析原始 HWND，实现关闭到托盘的隐藏与恢复。
+raw-window-handle = "0.6"
+
+[target.'cfg(unix)'.dependencies]
+# platform 层向内核发送 SIGTERM 优雅停止；Linux 还用 prctl 设置父进程死亡信号。
+libc = "0.2"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# Linux 托盘走 SNI/DBus 协议；ksni 是纯 Rust 实现，不依赖 GTK 与系统库。
+ksni = { version = "0.3", features = ["blocking"] }
+# 解码随包提交的托盘 PNG；与 ksni 内部的 image 版本一致，不重复编译。
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
+# Linux/macOS 使用系统标准用户目录；Windows 当前保持安装目录旁的便携式布局。
+directories = "6.0"
+
+[build-dependencies]
+serde_json = "1.0"
+# Windows 构建将多分辨率 ICO 编入可执行文件，供 GPUI 窗口和系统快捷方式读取。
+winresource = { version = "0.1.31", default-features = false }
+
+[profile.release]
+lto = "thin"
+strip = true
