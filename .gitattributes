@@ -1,0 +1,9 @@
+# 供应链校验要求字节精确：内核目录（含 GPL-3.0 LICENSE 与 manifest）
+# 禁止任何行尾转换，否则 Windows 检出后哈希与 manifest 不一致。
+kernel/** -text
+
+# 二进制资源不参与文本处理。
+*.png binary
+*.ico binary
+*.dll binary
+*.exe binary
