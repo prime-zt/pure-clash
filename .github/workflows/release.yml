@@ -78,9 +78,10 @@ jobs:
             https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
           chmod +x linuxdeploy
           export PATH="$PWD:$PATH"
-          # 脚本参数是内核版本目录名（与 manifest 一致），不是包版本。
-          kernel_version="$(jq -r '.version' kernel/*/manifest.json)"
-          ./packaging/linux/build-appimage.sh "$kernel_version"
+          # 第一个参数是内核版本目录名（与 manifest 一致），第二个是包版本
+          # （用于 AppImage 文件名）。
+          package_version="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "pure-clash") | .version')"
+          ./packaging/linux/build-appimage.sh "$(jq -r '.version' kernel/*/manifest.json)" "$package_version"
       - uses: actions/upload-artifact@v4
         with:
           name: linux-packages
