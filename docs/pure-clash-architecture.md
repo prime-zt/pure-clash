@@ -104,7 +104,7 @@ src/
     validation.rs    # 使用目标 Mihomo 版本执行配置校验
 ```
 
-当前已实现平台目录、进程守护、单实例、托盘、系统代理和 TUN 提权边界：默认配置先由同版本内核执行 `-t`，通过后再启动；Windows 子进程加入 Job Object，普通 Linux 子进程设置 `PR_SET_PDEATHSIG`（SIGKILL）并独立成进程组，unix 停止流程先发送 SIGTERM 最多等待 5 秒再升级 SIGKILL。Windows 系统代理写当前用户注册表，Linux GNOME/Cinnamon 使用 GSettings；Windows TUN 经 UAC 启动内核，Linux 首次经 polkit 安装 root 所有的 systemd 服务，后续通过按 UID 授权的受限 IPC 启动 root Mihomo。Linux DNS 由 Mihomo 的 `dns-hijack` 与双栈 fake-IP 随 TUN 路由接管，桌面进程不额外修改 NetworkManager 设备。controller client、配置订阅、代理选择和运行模式也已接入真实内核。
+当前已实现平台目录、进程守护、单实例、托盘、系统代理和 TUN 提权边界：默认配置先由同版本内核执行 `-t`，通过后再启动；Windows 子进程加入 Job Object，普通 Linux 子进程设置 `PR_SET_PDEATHSIG`（SIGKILL）并独立成进程组，unix 停止流程先发送 SIGTERM 最多等待 5 秒再升级 SIGKILL。Windows 系统代理写当前用户注册表，Linux GNOME/Cinnamon 使用 GSettings；Windows TUN 经 UAC 启动内核，Linux 首次经 polkit 安装 root 所有的 systemd 服务，后续通过按 UID 授权的受限 IPC 启动 root Mihomo。Windows 的 `ShellExecuteExW(runas)` 在专用 STA 线程执行，避免 UAC 的嵌套消息循环重入 GPUI 实体更新；启动结果携带代次回传，配置变更、停止或退出后才返回的旧进程会立即回收。Linux DNS 由 Mihomo 的 `dns-hijack` 与双栈 fake-IP 随 TUN 路由接管，桌面进程不额外修改 NetworkManager 设备。controller client、配置订阅、代理选择和运行模式也已接入真实内核。
 
 ## 4. 本地 controller 与鉴权
 

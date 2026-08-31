@@ -184,6 +184,10 @@ pub(crate) struct PureClash {
     /// 当前由应用持有的真实 Mihomo 子进程，释放时会自动停止。
     mihomo_process: Option<MihomoProcess>,
     core_state: CoreState,
+    /// 每次启动或停止都递增；后台返回的旧启动结果必须立即回收，不能覆盖新状态。
+    core_start_generation: u64,
+    /// UAC 尚未返回时合并配置重启请求，避免并发弹出多个授权窗口。
+    core_restart_pending: bool,
     /// 最近一次内核启停错误，直接展示在运行状态卡片中。
     mihomo_error: Option<String>,
     system_proxy: bool,
@@ -307,6 +311,8 @@ impl PureClash {
             kernel_available,
             mihomo_process: None,
             core_state: CoreState::Stopped,
+            core_start_generation: 0,
+            core_restart_pending: false,
             mihomo_error: None,
             system_proxy: false,
             // TUN 是基线里的持久开关，启动时如实恢复；系统代理始终默认关闭。
@@ -362,6 +368,11 @@ impl PureClash {
     /// 内核是否允许接受启停操作。
     fn core_operable(&self) -> bool {
         self.core_state != CoreState::Starting
+    }
+
+    /// 内核已经运行或正在异步启动；替换 runtime/Geo 数据时两种状态都必须重启。
+    fn core_active(&self) -> bool {
+        self.core_state != CoreState::Stopped
     }
 
     /// 主窗口创建后挂载平台托盘，并立即同步当前运行状态。
@@ -492,7 +503,7 @@ impl PureClash {
                     }
                     Ok(UpdateOutcome::Updated(info)) => {
                         let revision = short_revision(&info.revision);
-                        let restart_required = this.mihomo_process.is_some();
+                        let restart_required = this.core_active();
                         this.geodata_info = info;
                         this.geodata_status = Some(SharedString::from(if restart_required {
                             t!("settings.geodata_updated_reloaded", revision = revision)
@@ -582,23 +593,87 @@ impl PureClash {
         cx.notify();
     }
 
-    /// 启动内核：主线程完成 `-t` 校验与进程拉起，后台等待 controller 就绪。
+    /// 启动内核：Windows 在独立线程完成配置校验与 UAC，避免重入 GPUI 更新回调。
+    ///
+    /// `ShellExecuteExW(runas)` 会运行嵌套消息循环；若在 GPUI 实体更新回调里同步
+    /// 调用，连接轮询等前台任务可能重入 `App` 并触发 `RefCell already borrowed`。
+    /// Linux 的 pdeathsig 与创建进程的线程生命周期绑定，仍保持当前线程启动。
     fn start_core(&mut self, cx: &mut Context<Self>) {
         if !self.core_operable() || self.mihomo_process.is_some() {
             return;
         }
-        match MihomoProcess::start(
-            &self.paths,
-            &self.config.mihomo_version,
-            &self.paths.runtime_mihomo_config_file,
-            // TUN 需要系统网络权限；UAC/polkit 弹窗即用户的显式授权。
-            self.tun_enabled,
-        ) {
+        self.core_start_generation = self.core_start_generation.wrapping_add(1);
+        let generation = self.core_start_generation;
+        self.core_state = CoreState::Starting;
+        self.mihomo_error = None;
+        self.refresh_tray_texts();
+        cx.notify();
+
+        let paths = self.paths.clone();
+        let version = self.config.mihomo_version.clone();
+        let config_file = self.paths.runtime_mihomo_config_file.clone();
+        // TUN 需要系统网络权限；UAC/polkit 弹窗即用户的显式授权。
+        let elevated = self.tun_enabled;
+
+        #[cfg(target_os = "windows")]
+        {
+            let (sender, receiver) = async_channel::bounded(1);
+            let thread = std::thread::Builder::new()
+                .name("pure-clash-kernel-start".to_owned())
+                .spawn(move || {
+                    let result = MihomoProcess::start(&paths, &version, &config_file, elevated);
+                    // 应用已退出时接收端会关闭；result 的 Drop 会回收已启动的内核。
+                    let _ = sender.send_blocking(result);
+                });
+            if let Err(error) = thread {
+                self.finish_core_start(
+                    generation,
+                    Err(anyhow::anyhow!("无法创建内核启动线程：{error}")),
+                    cx,
+                );
+                return;
+            }
+            cx.spawn(async move |this, cx| {
+                let result = receiver
+                    .recv()
+                    .await
+                    .unwrap_or_else(|_| Err(anyhow::anyhow!("内核启动线程未返回结果")));
+                let _ = this.update(cx, |this, cx| {
+                    this.finish_core_start(generation, result, cx);
+                });
+            })
+            .detach();
+        }
+
+        #[cfg(not(target_os = "windows"))]
+        {
+            let result = MihomoProcess::start(&paths, &version, &config_file, elevated);
+            self.finish_core_start(generation, result, cx);
+        }
+    }
+
+    /// 提交一次内核启动结果；过期结果会随 `MihomoProcess::Drop` 立即终止。
+    fn finish_core_start(
+        &mut self,
+        generation: u64,
+        result: anyhow::Result<MihomoProcess>,
+        cx: &mut Context<Self>,
+    ) {
+        if generation != self.core_start_generation || self.core_state != CoreState::Starting {
+            drop(result);
+            if self.core_restart_pending && self.core_state == CoreState::Starting {
+                // 等旧启动线程完整返回并回收进程后，再按最新 runtime 发起唯一一次启动。
+                self.core_restart_pending = false;
+                self.core_state = CoreState::Stopped;
+                self.start_core(cx);
+            }
+            return;
+        }
+        match result {
             Ok(process) => {
                 self.mihomo_process = Some(process);
-                self.core_state = CoreState::Starting;
                 self.mihomo_error = None;
-                self.spawn_readiness_probe(cx);
+                self.spawn_readiness_probe(generation, cx);
             }
             Err(error) => {
                 self.mihomo_process = None;
@@ -626,13 +701,15 @@ impl PureClash {
                 self.mihomo_error = Some(t!("app.core_start_failed", error = detail).into_owned());
             }
         }
+        self.refresh_tray_texts();
+        cx.notify();
     }
 
     /// 内核就绪后核对 TUN 是否真实生效。
     ///
     /// 内核在缺少系统网络权限或平台 TUN 能力时会静默降级继续运行，界面不能
     /// 假装 TUN 已开启：未生效时自动回退关闭并重启内核，明确提示原因。
-    fn verify_tun_effective(&mut self, cx: &mut Context<Self>) {
+    fn verify_tun_effective(&mut self, generation: u64, cx: &mut Context<Self>) {
         if !self.tun_enabled {
             return;
         }
@@ -656,6 +733,9 @@ impl PureClash {
             });
             let result = check.await;
             let _ = this.update(cx, |this, cx| {
+                if generation != this.core_start_generation {
+                    return;
+                }
                 let Err(error) = result else {
                     return;
                 };
@@ -679,7 +759,7 @@ impl PureClash {
     }
 
     /// 后台轮询 controller `/version`；就绪后拉取运行模式与代理组。
-    fn spawn_readiness_probe(&mut self, cx: &mut Context<Self>) {
+    fn spawn_readiness_probe(&mut self, generation: u64, cx: &mut Context<Self>) {
         let Some(controller) = self.controller() else {
             self.core_state = CoreState::Running;
             return;
@@ -699,46 +779,51 @@ impl PureClash {
                 })
             };
             let result = probe.await;
-            let _ = this.update(cx, |this, cx| match result {
-                Ok(()) => {
-                    this.core_state = CoreState::Running;
-                    this.mihomo_error = None;
-                    this.refresh_tray_texts();
-                    this.fetch_runtime_state(cx);
-                    this.verify_tun_effective(cx);
+            let _ = this.update(cx, |this, cx| {
+                if generation != this.core_start_generation {
+                    return;
                 }
-                Err(error) => {
-                    // 内核未能就绪：先恢复代理设置再回收进程，避免流量断在死端口上。
-                    this.disable_system_proxy();
-                    this.stop_core();
-                    // TUN 开启时最常见的失败原因是缺少系统授权或平台 TUN 能力，
-                    // 自动回退到无 TUN 的配置并重新拉起内核，保证用户有可用代理。
-                    let mut fallback_error = None;
-                    if this.tun_enabled {
-                        // 回退事务会校验并原子写入关闭 TUN 的配置，再拉起普通内核。
-                        match this.revert_tun(cx) {
-                            Ok(()) => this.start_core(cx),
-                            Err(revert_error) => {
-                                fallback_error = Some(concise_error(
-                                    &format!("TUN 回退配置失败：{revert_error:#}"),
-                                    180,
-                                ));
+                match result {
+                    Ok(()) => {
+                        this.core_state = CoreState::Running;
+                        this.mihomo_error = None;
+                        this.refresh_tray_texts();
+                        this.fetch_runtime_state(cx);
+                        this.verify_tun_effective(generation, cx);
+                    }
+                    Err(error) => {
+                        // 内核未能就绪：先恢复代理设置再回收进程，避免流量断在死端口上。
+                        this.disable_system_proxy();
+                        this.stop_core();
+                        // TUN 开启时最常见的失败原因是缺少系统授权或平台 TUN 能力，
+                        // 自动回退到无 TUN 的配置并重新拉起内核，保证用户有可用代理。
+                        let mut fallback_error = None;
+                        if this.tun_enabled {
+                            // 回退事务会校验并原子写入关闭 TUN 的配置，再拉起普通内核。
+                            match this.revert_tun(cx) {
+                                Ok(()) => this.start_core(cx),
+                                Err(revert_error) => {
+                                    fallback_error = Some(concise_error(
+                                        &format!("TUN 回退配置失败：{revert_error:#}"),
+                                        180,
+                                    ));
+                                }
                             }
                         }
+                        let start_error = t!(
+                            "app.core_start_failed",
+                            error = concise_error(&format!("{error:#}"), 160)
+                        )
+                        .into_owned();
+                        this.integration_error = Some(match fallback_error {
+                            Some(fallback_error) => {
+                                concise_error(&format!("{start_error}；{fallback_error}"), 240)
+                            }
+                            None => start_error,
+                        });
+                        this.refresh_tray_texts();
+                        cx.notify();
                     }
-                    let start_error = t!(
-                        "app.core_start_failed",
-                        error = concise_error(&format!("{error:#}"), 160)
-                    )
-                    .into_owned();
-                    this.integration_error = Some(match fallback_error {
-                        Some(fallback_error) => {
-                            concise_error(&format!("{start_error}；{fallback_error}"), 240)
-                        }
-                        None => start_error,
-                    });
-                    this.refresh_tray_texts();
-                    cx.notify();
                 }
             });
         })
@@ -1034,6 +1119,14 @@ impl PureClash {
 
     /// 重启内核并重新拉取状态；配置切换后的真实生效路径。
     fn restart_core(&mut self, cx: &mut Context<Self>) {
+        if self.core_state == CoreState::Starting && self.mihomo_process.is_none() {
+            // UAC/校验线程无法安全强制取消；使其结果过期，并把多次重启合并为一次。
+            self.core_start_generation = self.core_start_generation.wrapping_add(1);
+            self.core_restart_pending = true;
+            self.refresh_tray_texts();
+            cx.notify();
+            return;
+        }
         self.stop_core();
         self.start_core(cx);
         self.refresh_tray_texts();
@@ -1045,6 +1138,9 @@ impl PureClash {
     /// 注意：配置切换（restart_core）也走这里，系统代理保持托管不中断，
     /// 仅在真实停机路径（手动停止/退出/内核失联）由调用方恢复代理设置。
     pub(crate) fn stop_core(&mut self) {
+        // 让仍在 UAC/校验线程中的启动结果失效；结果返回后由 Drop 自动回收。
+        self.core_start_generation = self.core_start_generation.wrapping_add(1);
+        self.core_restart_pending = false;
         let stop_result = self.mihomo_process.take().map(|mut process| process.stop());
 
         self.core_state = CoreState::Stopped;
@@ -1139,6 +1235,9 @@ impl PureClash {
     /// TUN 由内核承载，内核未运行时不允许开启（与系统代理约束一致）；
     /// 关闭随时允许，只写基线、下次启动生效。
     fn toggle_tun(&mut self, cx: &mut Context<Self>) {
+        if !self.core_operable() {
+            return;
+        }
         let enabled = !self.tun_enabled;
         if enabled && !self.mihomo_running() {
             self.integration_error = Some(t!("app.tun_requires_core").into_owned());
@@ -1195,7 +1294,7 @@ impl PureClash {
 
         self.baseline = Some(desired);
         self.tun_enabled = enabled;
-        if self.mihomo_process.is_some() {
+        if self.core_active() {
             self.restart_core(cx);
         }
         Ok(())
@@ -1585,7 +1684,7 @@ impl PureClash {
         self.profiles.remove(index);
         if was_active {
             self.active_profile = None;
-            if self.mihomo_process.is_some() {
+            if self.core_active() {
                 self.restart_core(cx);
             }
         } else {
@@ -1702,7 +1801,7 @@ impl PureClash {
     fn apply_runtime(&mut self, runtime_yaml: &str, cx: &mut Context<Self>) -> anyhow::Result<()> {
         // 先落地 runtime.yaml，未运行时下次启动直接使用新配置。
         write_runtime(&self.paths, runtime_yaml)?;
-        if self.mihomo_process.is_some() {
+        if self.core_active() {
             self.restart_core(cx);
         } else {
             cx.notify();

@@ -6,7 +6,8 @@
 use std::path::Path;
 
 use anyhow::{Result, anyhow};
-use windows_sys::Win32::Foundation::{CloseHandle, WAIT_TIMEOUT};
+use windows_sys::Win32::Foundation::{CloseHandle, S_FALSE, S_OK, WAIT_TIMEOUT};
+use windows_sys::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize};
 use windows_sys::Win32::System::Threading::{TerminateProcess, WaitForSingleObject};
 use windows_sys::Win32::UI::Shell::{
     SEE_MASK_NOASYNC, SEE_MASK_NOCLOSEPROCESS, SEE_MASK_UNICODE, SHELLEXECUTEINFOW, ShellExecuteExW,
@@ -50,6 +51,9 @@ pub(crate) fn launch_elevated(
     data_dir: &Path,
     config_file: &Path,
 ) -> Result<ElevatedProcess> {
+    // ShellExecuteExW 可能依赖 Shell 扩展和 COM；专用启动线程显式使用 STA，
+    // 避免未初始化 COM 时出现不稳定的 UAC/文件关联行为。
+    let _com = ComApartment::initialize_sta()?;
     let args = format!(
         "-d \"{}\" -f \"{}\"",
         data_dir.display(),
@@ -80,6 +84,27 @@ pub(crate) fn launch_elevated(
     Ok(ElevatedProcess {
         handle: info.hProcess as isize,
     })
+}
+
+/// 当前线程的 COM STA 生命周期；每次成功初始化都必须配对 CoUninitialize。
+struct ComApartment;
+
+impl ComApartment {
+    fn initialize_sta() -> Result<Self> {
+        let result = unsafe { CoInitializeEx(std::ptr::null(), COINIT_APARTMENTTHREADED as u32) };
+        if result != S_OK && result != S_FALSE {
+            return Err(anyhow!(
+                "无法初始化 Windows Shell STA（HRESULT 0x{result:08X}）"
+            ));
+        }
+        Ok(Self)
+    }
+}
+
+impl Drop for ComApartment {
+    fn drop(&mut self) {
+        unsafe { CoUninitialize() };
+    }
 }
 
 /// UTF-16 编码并以 NUL 结尾的 Windows 字符串。

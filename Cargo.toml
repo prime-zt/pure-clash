@@ -1,6 +1,6 @@
 [package]
 name = "pure-clash"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 description = "A lightweight Mihomo desktop client built with Rust and Zed GPUI"
 license = "GPL-3.0"
@@ -87,6 +87,7 @@ windows-sys = { version = "0.61", features = [
     "Win32_Networking_WinInet",
     "Win32_Security",
     "Win32_Storage_FileSystem",
+    "Win32_System_Com",
     "Win32_System_JobObjects",
     "Win32_System_Registry",
     "Win32_System_Threading",

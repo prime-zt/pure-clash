@@ -84,9 +84,11 @@ impl MihomoProcess {
         let mut child = if elevated {
             let process = launch_elevated(&executable, &paths.mihomo_data_dir, config_file)
                 .context("无法以所需系统权限启动 Mihomo 内核")?;
-            guard
-                .attach_handle(process.handle())
-                .context("无法为提权的内核进程挂接平台守护")?;
+            if let Err(error) = guard.attach_handle(process.handle()) {
+                // 提权进程已经创建，守护挂接失败时必须主动终止，不能只关闭句柄。
+                let _ = process.terminate();
+                return Err(error).context("无法为提权的内核进程挂接平台守护");
+            }
             KernelChild::Elevated(process)
         } else {
             let mut command = mihomo_command(&executable, paths, config_file);
@@ -249,6 +251,12 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn managed_process_can_return_from_platform_start_thread() {
+        fn assert_send<T: Send>() {}
+        assert_send::<MihomoProcess>();
+    }
 
     #[test]
     fn truncates_validation_output_at_character_boundary() {

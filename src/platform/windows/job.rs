@@ -14,6 +14,10 @@ pub(crate) struct JobObject {
     handle: HANDLE,
 }
 
+// SAFETY: Job Object 是由本类型独占的 Windows 内核句柄，没有线程亲和性；所有操作
+// 都通过 Win32 线程安全 API 完成，移动所有权不会让句柄被并发关闭或重复释放。
+unsafe impl Send for JobObject {}
+
 impl JobObject {
     /// 创建启用了 `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` 的匿名 Job Object。
     pub(crate) fn new() -> io::Result<Self> {
