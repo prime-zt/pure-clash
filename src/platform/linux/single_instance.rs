@@ -51,7 +51,7 @@ impl Drop for SingleInstance {
     }
 }
 
-fn acquire_named(name: &str, notify_primary: bool) -> Result<SingleInstanceState> {
+fn acquire_named(name: &str, should_notify_primary: bool) -> Result<SingleInstanceState> {
     let address = SocketAddr::from_abstract_name(name.as_bytes())
         .with_context(|| format!("无法解析单实例 socket 名称：{name}"))?;
 
@@ -80,7 +80,7 @@ fn acquire_named(name: &str, notify_primary: bool) -> Result<SingleInstanceState
             })
         }
         Err(error) if error.kind() == io::ErrorKind::AddrInUse => {
-            if notify_primary {
+            if should_notify_primary {
                 notify_primary(&address)?;
             }
             Ok(SingleInstanceState::Secondary)
