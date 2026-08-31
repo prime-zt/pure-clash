@@ -38,8 +38,9 @@ pub(crate) fn launch_elevated(
     executable: &Path,
     data_dir: &Path,
     config_file: &Path,
+    allow_interactive: bool,
 ) -> Result<ElevatedProcess> {
-    let pid = tun_service::start_core(executable, data_dir, config_file)?;
+    let pid = tun_service::start_core(executable, data_dir, config_file, allow_interactive)?;
     Ok(ElevatedProcess { pid })
 }
 

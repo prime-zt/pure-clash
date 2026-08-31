@@ -4,6 +4,8 @@ allow-lan: false
 bind-address: 127.0.0.1
 mode: rule
 log-level: info
+unified-delay: true
+tcp-concurrent: true
 ipv6: false
 
 # `DIRECT` 是 Mihomo 内置出站；默认策略组只有这一个可选节点。

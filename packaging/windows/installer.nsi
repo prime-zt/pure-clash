@@ -58,6 +58,7 @@ ManifestDPIAware true
 
 !define APP_EXE "pure-clash.exe"
 !define UNINSTALL_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_ID}"
+!define RUN_KEY "Software\Microsoft\Windows\CurrentVersion\Run"
 
 Name "${APP_NAME}"
 Caption "${APP_NAME} ${APP_VERSION} 安装程序"
@@ -171,6 +172,8 @@ LangString DESC_SecDesktop ${LANG_SIMPCHINESE} "在当前用户桌面创建启�
 
 Section "Uninstall"
   ; config 和 data 可能包含用户配置，卸载时默认保留，避免静默删除用户数据。
+  ; 登录自启属于安装路径引用，卸载主程序前必须移除，避免留下失效启动项。
+  DeleteRegValue HKCU "${RUN_KEY}" "PureClash"
   Delete "$DESKTOP\${APP_NAME}.lnk"
   Delete "$SMPROGRAMS\${APP_NAME}\${APP_NAME}.lnk"
   Delete "$SMPROGRAMS\${APP_NAME}\卸载 ${APP_NAME}.lnk"

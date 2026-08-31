@@ -278,7 +278,11 @@ pub(super) fn render_titlebar(
             app.system_proxy,
             palette,
         ))
-        .child(system_flag_pill(tr("status.tun"), app.tun_enabled, palette))
+        .child(system_flag_pill(
+            tr("status.tun"),
+            app.tun_running(),
+            palette,
+        ))
         .child(language_button(app.config.language, palette, cx))
         .child(theme_button(app.config.theme.is_dark(), palette, cx));
 

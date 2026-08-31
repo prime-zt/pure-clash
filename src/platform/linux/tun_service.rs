@@ -168,12 +168,17 @@ pub(super) fn run_internal_mode_if_requested() -> Result<bool> {
     }
 }
 
-pub(super) fn start_core(source_kernel: &Path, data_dir: &Path, config_file: &Path) -> Result<u32> {
+pub(super) fn start_core(
+    source_kernel: &Path,
+    data_dir: &Path,
+    config_file: &Path,
+    allow_install: bool,
+) -> Result<u32> {
     if Path::new("/sys/class/net/Meta").exists() {
         bail!("检测到其他 Mihomo TUN 设备 Meta；请先关闭其他代理客户端的 TUN 模式");
     }
     let bundle = collect_runtime_bundle(data_dir, config_file)?;
-    ensure_service(source_kernel)?;
+    ensure_service(source_kernel, allow_install)?;
     let response = request(&ServiceRequest::Start { bundle })?;
     if !response.ok {
         bail!(
@@ -382,9 +387,12 @@ fn normalized_destination(path: &Path) -> Result<PathBuf> {
     Ok(result)
 }
 
-fn ensure_service(source_kernel: &Path) -> Result<()> {
+fn ensure_service(source_kernel: &Path, allow_install: bool) -> Result<()> {
     if service_is_current() {
         return Ok(());
+    }
+    if !allow_install {
+        bail!("Linux TUN 服务不可用，登录自启阶段禁止请求 polkit 授权");
     }
 
     let helper = env::current_exe().context("无法确定 Linux TUN 服务安装器路径")?;
@@ -420,7 +428,9 @@ fn ensure_service(source_kernel: &Path) -> Result<()> {
 }
 
 fn service_is_current() -> bool {
-    request(&ServiceRequest::Ping).is_ok_and(|response| {
+    // 登录自启探测必须快速且无交互；服务无响应时由上层关闭 TUN 配置并回退
+    // 普通内核，不能阻塞整个内核启动。
+    request_with_timeout(&ServiceRequest::Ping, Duration::from_millis(500)).is_ok_and(|response| {
         response.ok
             && response.protocol == SERVICE_PROTOCOL
             && response.service_version == env!("CARGO_PKG_VERSION")
@@ -429,9 +439,13 @@ fn service_is_current() -> bool {
 }
 
 fn request(request: &ServiceRequest) -> Result<ServiceResponse> {
+    request_with_timeout(request, Duration::from_secs(30))
+}
+
+fn request_with_timeout(request: &ServiceRequest, timeout: Duration) -> Result<ServiceResponse> {
     let mut stream = UnixStream::connect(SERVICE_SOCKET).context("无法连接 Linux TUN 服务")?;
-    stream.set_read_timeout(Some(Duration::from_secs(30)))?;
-    stream.set_write_timeout(Some(Duration::from_secs(30)))?;
+    stream.set_read_timeout(Some(timeout))?;
+    stream.set_write_timeout(Some(timeout))?;
     write_frame(&mut stream, request)?;
     read_frame(&mut stream)
 }

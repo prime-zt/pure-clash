@@ -14,14 +14,14 @@ use async_channel::{Receiver, Sender, bounded};
 /// 抽象命名空间 socket 名称前缀；后缀拼接当前用户 UID，避免多用户互相干扰。
 const INSTANCE_SOCKET_BASE: &str = "pure-clash-single-instance";
 
-/// 单实例检查结果；次实例通知首实例后必须立即结束启动流程。
+/// 单实例检查结果；次实例必须立即结束启动流程，是否通知首实例由启动模式决定。
 pub(crate) enum SingleInstanceState {
     /// 当前进程是首实例，同时提供后续启动请求的异步接收端。
     Primary {
         guard: SingleInstance,
         activation_requests: Receiver<()>,
     },
-    /// 已有首实例运行，激活信号已经发送。
+    /// 已有首实例运行；交互启动已发送激活信号，自启启动保持静默。
     Secondary,
 }
 
@@ -34,10 +34,10 @@ pub(crate) struct SingleInstance {
 
 impl SingleInstance {
     /// 在当前用户会话中获取 Pure Clash 单实例资格。
-    pub(crate) fn acquire() -> Result<SingleInstanceState> {
+    pub(crate) fn acquire(notify_primary: bool) -> Result<SingleInstanceState> {
         // 抽象 socket 名在内核网络命名空间内全局可见，按用户隔离。
         let uid = unsafe { libc::getuid() };
-        acquire_named(&format!("{INSTANCE_SOCKET_BASE}-{uid}"))
+        acquire_named(&format!("{INSTANCE_SOCKET_BASE}-{uid}"), notify_primary)
     }
 }
 
@@ -51,7 +51,7 @@ impl Drop for SingleInstance {
     }
 }
 
-fn acquire_named(name: &str) -> Result<SingleInstanceState> {
+fn acquire_named(name: &str, notify_primary: bool) -> Result<SingleInstanceState> {
     let address = SocketAddr::from_abstract_name(name.as_bytes())
         .with_context(|| format!("无法解析单实例 socket 名称：{name}"))?;
 
@@ -80,7 +80,9 @@ fn acquire_named(name: &str) -> Result<SingleInstanceState> {
             })
         }
         Err(error) if error.kind() == io::ErrorKind::AddrInUse => {
-            notify_primary(&address)?;
+            if notify_primary {
+                notify_primary(&address)?;
+            }
             Ok(SingleInstanceState::Secondary)
         }
         Err(error) => Err(error).context("无法创建 Pure Clash 单实例监听"),
@@ -141,7 +143,7 @@ mod tests {
     #[test]
     fn second_instance_notifies_primary_instance() {
         let name = unique_name();
-        let primary = acquire_named(&name).expect("首实例创建应成功");
+        let primary = acquire_named(&name, true).expect("首实例创建应成功");
         let (guard, activation_requests) = match primary {
             SingleInstanceState::Primary {
                 guard,
@@ -151,7 +153,7 @@ mod tests {
         };
 
         assert!(matches!(
-            acquire_named(&name).expect("次实例通知应成功"),
+            acquire_named(&name, true).expect("次实例通知应成功"),
             SingleInstanceState::Secondary
         ));
 
@@ -172,12 +174,32 @@ mod tests {
     #[test]
     fn released_guard_allows_new_primary() {
         let name = unique_name();
-        drop(acquire_named(&name).expect("首实例创建应成功"));
+        drop(acquire_named(&name, true).expect("首实例创建应成功"));
 
         // 抽象 socket 随进程内 socket 关闭立即释放，重新获取应恢复首实例资格。
         assert!(matches!(
-            acquire_named(&name).expect("释放后重新获取应成功"),
+            acquire_named(&name, true).expect("释放后重新获取应成功"),
             SingleInstanceState::Primary { .. }
         ));
+    }
+
+    #[test]
+    fn autostart_secondary_instance_does_not_notify_primary() {
+        let name = unique_name();
+        let primary = acquire_named(&name, false).expect("首实例创建应成功");
+        let (guard, activation_requests) = match primary {
+            SingleInstanceState::Primary {
+                guard,
+                activation_requests,
+            } => (guard, activation_requests),
+            SingleInstanceState::Secondary => panic!("首次获取不应被判定为次实例"),
+        };
+
+        assert!(matches!(
+            acquire_named(&name, false).expect("自启次实例检查应成功"),
+            SingleInstanceState::Secondary
+        ));
+        assert!(activation_requests.try_recv().is_err());
+        drop(guard);
     }
 }

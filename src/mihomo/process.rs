@@ -57,11 +57,14 @@ impl MihomoProcess {
     ///
     /// `elevated` 服务于 TUN 等需要系统网络权限的能力：Windows 经 UAC，
     /// Linux 经一次 polkit 授权安装的 root 服务；用户拒绝授权即返回错误。
+    /// `allow_interactive_elevation` 由启动场景决定是否允许 UAC/polkit；禁止时平台
+    /// 授权不可静默完成就直接返回错误，由上层关闭 TUN 并回退普通内核。
     pub(crate) fn start(
         paths: &AppPaths,
         version: &str,
         config_file: &Path,
         elevated: bool,
+        allow_interactive_elevation: bool,
     ) -> Result<Self> {
         let executable = kernel::bundled_path(paths, version)
             .with_context(|| format!("Mihomo 版本目录无效：{version}"))?;
@@ -82,8 +85,13 @@ impl MihomoProcess {
 
         let mut guard = KernelProcessGuard::new()?;
         let mut child = if elevated {
-            let process = launch_elevated(&executable, &paths.mihomo_data_dir, config_file)
-                .context("无法以所需系统权限启动 Mihomo 内核")?;
+            let process = launch_elevated(
+                &executable,
+                &paths.mihomo_data_dir,
+                config_file,
+                allow_interactive_elevation,
+            )
+            .context("无法以所需系统权限启动 Mihomo 内核")?;
             if let Err(error) = guard.attach_handle(process.handle()) {
                 // 提权进程已经创建，守护挂接失败时必须主动终止，不能只关闭句柄。
                 let _ = process.terminate();
@@ -126,6 +134,12 @@ impl MihomoProcess {
             return Ok(());
         }
         self.child.terminate()
+    }
+
+    /// 非阻塞读取受管进程是否仍存活；查询失败按已退出处理，让上层及时撤销
+    /// 指向失效内核的系统集成状态。
+    pub(crate) fn is_running(&mut self) -> bool {
+        !self.child.exited().unwrap_or(true)
     }
 }
 
@@ -315,6 +329,7 @@ time=3 level=error msg=\"rules[0] error: can't download GeoSite.dat\"\n";
             env!("PURE_CLASH_DEFAULT_MIHOMO_VERSION"),
             &paths.default_mihomo_config_file,
             false,
+            true,
         )
         .expect("应启动随包 Mihomo");
         process.stop().expect("应停止并回收随包 Mihomo");

@@ -17,6 +17,13 @@ pub(crate) mod windows;
 #[cfg(target_os = "linux")]
 pub(crate) mod linux;
 
+// Linux autostart 文件生成只依赖标准跨平台 API；非 Linux 测试构建也编译并运行
+// 其纯逻辑测试，让 desktop entry 转义规则在常规测试中持续受覆盖。
+#[cfg(all(test, not(target_os = "linux")))]
+#[allow(dead_code)]
+#[path = "linux/autostart.rs"]
+mod linux_autostart_tests;
+
 /// 平台无关托盘：各平台提供同名 `SystemTray`，事件统一经 `TrayAction` 通道转发。
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 pub(crate) mod tray;
@@ -26,6 +33,33 @@ pub(crate) mod file;
 pub(crate) mod process_guard;
 
 pub(crate) use process_guard::KernelProcessGuard;
+
+/// 当前用户登录自启的系统注册状态；以系统配置为准，不在 `app.json` 复制状态。
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AutoStartStatus {
+    /// 系统条目存在、未禁用且指向当前可执行文件。
+    Enabled,
+    /// 系统条目不存在、已禁用或仍指向旧路径。
+    Disabled,
+    /// 当前平台尚未实现登录自启。
+    Unavailable,
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) use linux::{autostart_status, set_autostart};
+#[cfg(target_os = "windows")]
+pub(crate) use windows::{autostart_status, set_autostart};
+
+#[cfg(target_os = "macos")]
+pub(crate) fn autostart_status() -> anyhow::Result<AutoStartStatus> {
+    Ok(AutoStartStatus::Unavailable)
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn set_autostart(_enabled: bool) -> anyhow::Result<()> {
+    anyhow::bail!("macOS 暂未实现登录自启")
+}
 
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 pub(crate) use tray::{SystemTray, TrayAction};
@@ -108,6 +142,7 @@ mod elevation_stub {
         _exe: &Path,
         _data_dir: &Path,
         _config_file: &Path,
+        _allow_interactive: bool,
     ) -> Result<ElevatedProcess> {
         anyhow::bail!("当前平台暂不支持提权启动内核")
     }

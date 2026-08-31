@@ -105,7 +105,7 @@ fn render_page_header(
                 .child(header_status_toggle(
                     "header-tun",
                     tr("status.tun"),
-                    app.tun_enabled,
+                    app.tun_running(),
                     palette,
                     cx.listener(|this, _, _, cx| this.toggle_tun(cx)),
                 ))

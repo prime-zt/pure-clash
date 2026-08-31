@@ -373,9 +373,14 @@ rules:
 
         // 2. 合并产物写入 runtime.yaml 并启动内核。
         write_runtime(&paths, &runtime).expect("应写入运行时配置");
-        let mut process =
-            MihomoProcess::start(&paths, version, &paths.runtime_mihomo_config_file, false)
-                .expect("应启动内核");
+        let mut process = MihomoProcess::start(
+            &paths,
+            version,
+            &paths.runtime_mihomo_config_file,
+            false,
+            true,
+        )
+        .expect("应启动内核");
 
         // 3. controller 就绪后验证配置生效。
         let baseline = ensure_baseline(&paths).expect("应读取基线");

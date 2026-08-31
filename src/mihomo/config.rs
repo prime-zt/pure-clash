@@ -77,6 +77,10 @@ impl LocalBaseline {
         // 行为默认值由客户端控制。
         set("mode", Value::from("rule"));
         set("log-level", Value::from("info"));
+        // 统一延迟口径，并让 Mihomo 并发尝试目标 IP；这两个产品默认适用于
+        // 内置配置和所有订阅，避免不同配置来源产生不一致的连接行为。
+        set("unified-delay", Value::from(true));
+        set("tcp-concurrent", Value::from(true));
         // TUN 开启时放行 IPv6，由 Mihomo 的默认双栈 TUN 地址和 auto-route 接管；
         // 关闭时保持 false。
         set("ipv6", Value::from(self.tun_enable));
@@ -361,6 +365,8 @@ mixed-port: 18080
 allow-lan: true
 external-controller: 0.0.0.0:9090
 secret: leaked-from-subscription
+unified-delay: false
+tcp-concurrent: false
 tun:
   enable: true
 dns:
@@ -405,6 +411,14 @@ rules:
         assert_eq!(
             mapping.get(Value::from("secret")),
             Some(&Value::from("test-secret"))
+        );
+        assert_eq!(
+            mapping.get(Value::from("unified-delay")),
+            Some(&Value::from(true))
+        );
+        assert_eq!(
+            mapping.get(Value::from("tcp-concurrent")),
+            Some(&Value::from(true))
         );
         // 额外监听端口必须关闭。
         assert_eq!(mapping.get(Value::from("port")), Some(&Value::from(0)));

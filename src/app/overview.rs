@@ -366,12 +366,12 @@ fn render_runtime_card(
         ))
         .child(info_line(
             tr("settings.tun"),
-            if app.tun_enabled {
+            if app.tun_running() {
                 tr("overview.enabled")
             } else {
                 tr("overview.disabled")
             },
-            app.tun_enabled,
+            app.tun_running(),
             palette,
         ))
         .child(
@@ -390,7 +390,7 @@ fn render_runtime_card(
                 .child(action_button(
                     "runtime-tun",
                     tr("status.tun"),
-                    app.tun_enabled,
+                    app.tun_running(),
                     app.mihomo_running(),
                     palette,
                     cx.listener(|this, _, _, cx| this.toggle_tun(cx)),

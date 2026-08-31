@@ -50,7 +50,11 @@ pub(crate) fn launch_elevated(
     exe: &Path,
     data_dir: &Path,
     config_file: &Path,
+    allow_interactive: bool,
 ) -> Result<ElevatedProcess> {
+    if !allow_interactive {
+        return Err(anyhow!("当前启动阶段禁止弹出 Windows UAC"));
+    }
     // ShellExecuteExW 可能依赖 Shell 扩展和 COM；专用启动线程显式使用 STA，
     // 避免未初始化 COM 时出现不稳定的 UAC/文件关联行为。
     let _com = ComApartment::initialize_sta()?;

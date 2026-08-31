@@ -27,9 +27,11 @@ use crate::{
         geodata::{GeodataInfo, UpdateOutcome},
     },
     platform::{
-        AppPaths, SystemProxySnapshot, capture_system_proxy, restore_system_proxy, set_system_proxy,
+        AppPaths, AutoStartStatus, SystemProxySnapshot, autostart_status, capture_system_proxy,
+        restore_system_proxy, set_autostart, set_system_proxy,
     },
     profile,
+    startup::StartupMode,
     theme::{FontWeightExt, Palette},
     ui::TextInput,
 };
@@ -166,6 +168,17 @@ enum CoreState {
     Running,
 }
 
+/// TUN 状态展示的唯一判定：持久配置只表达启动意图，不能代替运行事实。
+fn tun_runtime_active(core_state: CoreState, controller_confirmed: bool) -> bool {
+    core_state == CoreState::Running && controller_confirmed
+}
+
+/// Windows 没有常驻提权服务，登录恢复 TUN 必须允许 UAC；Linux 登录阶段只允许
+/// 访问已安装服务，避免桌面刚登录就弹出 polkit。
+fn startup_allows_interactive_elevation(startup_mode: StartupMode) -> bool {
+    cfg!(target_os = "windows") || !startup_mode.is_autostart()
+}
+
 /// 应用外壳用于刷新平台托盘的完整文案快照。
 pub(super) struct TrayTexts {
     pub(super) tooltip: String,
@@ -196,7 +209,17 @@ pub(crate) struct PureClash {
     /// 最近一次内核启停错误，直接展示在运行状态卡片中。
     mihomo_error: Option<String>,
     system_proxy: bool,
-    tun_enabled: bool,
+    /// 本地基线中持久化的 TUN 期望值，决定下一次内核是否请求 TUN 权限。
+    tun_configured: bool,
+    /// controller 已确认的当前 TUN 真实状态；内核未运行时必须为 false。
+    tun_effective: bool,
+    /// 登录自启状态始终来自平台配置，不复制到 `app.json`，避免与系统启动管理器分叉。
+    autostart_enabled: bool,
+    /// macOS 等尚未实现平台注册的平台显示禁用态，不能响应开关操作。
+    autostart_available: bool,
+    /// Linux 登录自启阶段为 false，避免弹 polkit；Windows 允许恢复已配置 TUN
+    /// 所必需的 UAC。无交互启动失败时会关闭 TUN 配置并回退普通内核。
+    interactive_elevation_allowed: bool,
     /// 运行模式；与 controller 同步，未运行时保持上次已知值。
     mode: ProxyMode,
     /// controller 返回的真实策略组快照；内核未运行时为空。
@@ -227,7 +250,7 @@ pub(crate) struct PureClash {
     /// 配置页后台任务忙态提示；非空时禁用相关操作。
     profile_busy: Option<String>,
     profile_error: Option<String>,
-    /// 系统代理 / TUN 的操作失败提示，展示在设置页与概览页。
+    /// 登录自启、系统代理与 TUN 的操作失败提示，展示在设置页与概览页。
     integration_error: Option<String>,
     /// 当前已安装 Geo 数据的官方提交与更新时间。
     geodata_info: GeodataInfo,
@@ -254,7 +277,11 @@ pub(crate) struct PureClash {
 }
 
 impl PureClash {
-    pub(crate) fn new(loaded_config: LoadedConfig, cx: &mut Context<Self>) -> Self {
+    pub(crate) fn new(
+        loaded_config: LoadedConfig,
+        startup_mode: StartupMode,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let LoadedConfig {
             mut config,
             paths,
@@ -306,6 +333,19 @@ impl PureClash {
         let profile_form_name = cx.new(|cx| TextInput::new(t!("profiles.name_placeholder"), cx));
         let profile_form_url = cx.new(|cx| TextInput::new(t!("profiles.url_placeholder"), cx));
         let profiles = config.profiles.clone();
+        let (autostart_enabled, autostart_available) = match autostart_status() {
+            Ok(AutoStartStatus::Enabled) => (true, true),
+            Ok(AutoStartStatus::Disabled) => (false, true),
+            Ok(AutoStartStatus::Unavailable) => (false, false),
+            Err(error) => {
+                // 读取失败不代表平台不支持，保留可操作开关让用户可以直接重试写入。
+                eprintln!("读取登录自启状态失败：{error:#}");
+                (false, true)
+            }
+        };
+        let tun_configured = baseline
+            .as_ref()
+            .is_some_and(|baseline| baseline.tun_enable);
 
         let mut app = Self {
             page: Page::Overview,
@@ -318,10 +358,14 @@ impl PureClash {
             core_restart_pending: false,
             mihomo_error: None,
             system_proxy: false,
-            // TUN 是基线里的持久开关，启动时如实恢复；系统代理始终默认关闭。
-            tun_enabled: baseline
-                .as_ref()
-                .is_some_and(|baseline| baseline.tun_enable),
+            // 配置期望与真实运行状态分离；只有 controller 确认后才显示 TUN 开启。
+            tun_configured,
+            tun_effective: false,
+            autostart_enabled,
+            autostart_available,
+            // Windows 登录恢复 TUN 必须允许 UAC；Linux 已安装服务可在 false 时静默
+            // 启动，服务不可用则回退普通内核，不在登录阶段弹 polkit。
+            interactive_elevation_allowed: startup_allows_interactive_elevation(startup_mode),
             mode: ProxyMode::Rule,
             groups: Vec::new(),
             connections: Vec::new(),
@@ -367,6 +411,12 @@ impl PureClash {
         matches!(self.core_state, CoreState::Running)
     }
 
+    /// TUN 只有在内核运行且 controller 已确认时才算真正开启；持久配置本身
+    /// 不能用于状态展示，避免启动中或启动失败时出现虚假开启。
+    fn tun_running(&self) -> bool {
+        tun_runtime_active(self.core_state, self.tun_effective)
+    }
+
     /// 内核是否允许接受启停操作。
     fn core_operable(&self) -> bool {
         self.core_state != CoreState::Starting
@@ -389,7 +439,7 @@ impl PureClash {
         } else {
             t!("tray.off")
         };
-        let tun = if self.tun_enabled {
+        let tun = if self.tun_running() {
             t!("tray.on")
         } else {
             t!("tray.off")
@@ -416,6 +466,9 @@ impl PureClash {
     }
 
     fn select_page(&mut self, page: Page, cx: &mut Context<Self>) {
+        if page == Page::Settings {
+            self.refresh_autostart_status();
+        }
         self.page = page;
         // 进入关于页时自动检查一次更新；本会话已有结果或正在检查则跳过，
         // 手动按钮随时可以重新检查。
@@ -545,6 +598,58 @@ impl PureClash {
         self.set_language(self.config.language.toggled(), cx);
     }
 
+    /// 登录自启开关直接修改平台配置；只有系统调用成功后才更新界面状态。
+    fn toggle_autostart(&mut self, cx: &mut Context<Self>) {
+        if !self.autostart_available {
+            return;
+        }
+        let enabled = !self.autostart_enabled;
+        match set_autostart(enabled) {
+            Ok(()) => {
+                self.autostart_enabled = enabled;
+                self.integration_error = None;
+            }
+            Err(error) => {
+                self.integration_error = Some(
+                    t!(
+                        "app.autostart_failed",
+                        error = concise_error(&format!("{error:#}"), 160)
+                    )
+                    .into_owned(),
+                );
+            }
+        }
+        cx.notify();
+    }
+
+    /// 每次进入设置页重新读取平台注册，外部启动管理器的修改不会被缓存状态覆盖。
+    fn refresh_autostart_status(&mut self) {
+        match autostart_status() {
+            Ok(AutoStartStatus::Enabled) => {
+                self.autostart_enabled = true;
+                self.autostart_available = true;
+            }
+            Ok(AutoStartStatus::Disabled) => {
+                self.autostart_enabled = false;
+                self.autostart_available = true;
+            }
+            Ok(AutoStartStatus::Unavailable) => {
+                self.autostart_enabled = false;
+                self.autostart_available = false;
+            }
+            Err(error) => {
+                // 短暂读取失败时保留上次状态，避免把已启用误画成关闭。
+                eprintln!("刷新登录自启状态失败：{error:#}");
+            }
+        }
+    }
+
+    /// 用户明确打开窗口后，Linux 后续启用 TUN 可以弹出 polkit；登录自启本身
+    /// 已经启动普通内核或通过现有服务启动 TUN，不在这里补发内核启动。
+    fn allow_interactive_elevation(&mut self) {
+        self.interactive_elevation_allowed = true;
+    }
+
     fn set_language(&mut self, language: Language, cx: &mut Context<Self>) {
         if language == self.config.language {
             return;
@@ -597,6 +702,7 @@ impl PureClash {
         self.core_start_generation = self.core_start_generation.wrapping_add(1);
         let generation = self.core_start_generation;
         self.core_state = CoreState::Starting;
+        self.tun_effective = false;
         self.mihomo_error = None;
         cx.notify();
 
@@ -604,7 +710,8 @@ impl PureClash {
         let version = self.config.mihomo_version.clone();
         let config_file = self.paths.runtime_mihomo_config_file.clone();
         // TUN 需要系统网络权限；UAC/polkit 弹窗即用户的显式授权。
-        let elevated = self.tun_enabled;
+        let elevated = self.tun_configured;
+        let allow_interactive_elevation = self.interactive_elevation_allowed;
 
         #[cfg(target_os = "windows")]
         {
@@ -612,7 +719,13 @@ impl PureClash {
             let thread = std::thread::Builder::new()
                 .name("pure-clash-kernel-start".to_owned())
                 .spawn(move || {
-                    let result = MihomoProcess::start(&paths, &version, &config_file, elevated);
+                    let result = MihomoProcess::start(
+                        &paths,
+                        &version,
+                        &config_file,
+                        elevated,
+                        allow_interactive_elevation,
+                    );
                     // 应用已退出时接收端会关闭；result 的 Drop 会回收已启动的内核。
                     let _ = sender.send_blocking(result);
                 });
@@ -638,7 +751,13 @@ impl PureClash {
 
         #[cfg(not(target_os = "windows"))]
         {
-            let result = MihomoProcess::start(&paths, &version, &config_file, elevated);
+            let result = MihomoProcess::start(
+                &paths,
+                &version,
+                &config_file,
+                elevated,
+                allow_interactive_elevation,
+            );
             self.finish_core_start(generation, result, cx);
         }
     }
@@ -671,7 +790,7 @@ impl PureClash {
                 self.core_state = CoreState::Stopped;
                 // 提权启动被拒绝（用户取消 UAC/polkit）或校验失败时，回退关闭 TUN
                 // 并以普通权限重新拉起内核，保证用户始终有可用代理。
-                if self.tun_enabled {
+                if self.tun_configured {
                     let fallback_message = tun_reverted_error(&error);
                     if let Err(revert_error) = self.revert_tun(cx) {
                         self.integration_error = Some(concise_error(
@@ -699,7 +818,7 @@ impl PureClash {
     /// 内核在缺少系统网络权限或平台 TUN 能力时会静默降级继续运行，界面不能
     /// 假装 TUN 已开启：未生效时自动回退关闭并重启内核，明确提示原因。
     fn verify_tun_effective(&mut self, generation: u64, cx: &mut Context<Self>) {
-        if !self.tun_enabled {
+        if !self.tun_configured {
             return;
         }
         let Some(controller) = self.controller() else {
@@ -726,9 +845,12 @@ impl PureClash {
                     return;
                 }
                 let Err(error) = result else {
+                    // 只有 controller 明确返回开启，界面和托盘才显示 TUN 已生效。
+                    this.tun_effective = true;
+                    cx.notify();
                     return;
                 };
-                if !this.tun_enabled {
+                if !this.tun_configured {
                     return;
                 }
                 // 回退事务会校验并原子写入关闭 TUN 的配置，运行中自动重启内核。
@@ -785,7 +907,7 @@ impl PureClash {
                         // TUN 开启时最常见的失败原因是缺少系统授权或平台 TUN 能力，
                         // 自动回退到无 TUN 的配置并重新拉起内核，保证用户有可用代理。
                         let mut fallback_error = None;
-                        if this.tun_enabled {
+                        if this.tun_configured {
                             // 回退事务会校验并原子写入关闭 TUN 的配置，再拉起普通内核。
                             match this.revert_tun(cx) {
                                 Ok(()) => this.start_core(cx),
@@ -889,8 +1011,22 @@ impl PureClash {
                     if this.mihomo_running() {
                         match snapshot {
                             Ok(data) => this.apply_connections(data),
-                            // controller 短暂不可达（重启窗口期）静默清零，等下一拍恢复。
-                            Err(_) => this.clear_live_traffic(),
+                            Err(_) => {
+                                // controller 短暂不可达时只清零流量；若受管进程也已
+                                // 退出，则立即撤销所有依赖内核的真实运行状态。
+                                let process_running = this
+                                    .mihomo_process
+                                    .as_mut()
+                                    .is_some_and(MihomoProcess::is_running);
+                                if process_running {
+                                    this.clear_live_traffic();
+                                } else {
+                                    this.disable_system_proxy();
+                                    this.stop_core();
+                                    this.integration_error =
+                                        Some(t!("app.core_stopped_unexpectedly").into_owned());
+                                }
+                            }
                         }
                     }
                     cx.notify();
@@ -1128,6 +1264,7 @@ impl PureClash {
         let stop_result = self.mihomo_process.take().map(|mut process| process.stop());
 
         self.core_state = CoreState::Stopped;
+        self.tun_effective = false;
         if let Some(Err(error)) = stop_result {
             let detail = concise_error(&format!("{error:#}"), 240);
             eprintln!("停止 Mihomo 失败，详情已显示在应用界面");
@@ -1219,7 +1356,7 @@ impl PureClash {
         if !self.core_operable() {
             return;
         }
-        let enabled = !self.tun_enabled;
+        let enabled = !self.tun_configured;
         if enabled && !self.mihomo_running() {
             self.integration_error = Some(t!("app.tun_requires_core").into_owned());
             cx.notify();
@@ -1270,7 +1407,9 @@ impl PureClash {
         }
 
         self.baseline = Some(desired);
-        self.tun_enabled = enabled;
+        self.tun_configured = enabled;
+        // 配置提交不等于系统能力已经生效；重启后由 controller 再确认。
+        self.tun_effective = false;
         if self.core_active() {
             self.restart_core(cx);
         }
@@ -2160,5 +2299,26 @@ mod tests {
     fn concise_error_preserves_utf8_boundaries() {
         assert_eq!(concise_error("启动失败", 2), "启动…");
         assert_eq!(concise_error("short", 10), "short");
+    }
+
+    #[test]
+    fn tun_status_requires_running_core_and_controller_confirmation() {
+        assert!(!tun_runtime_active(CoreState::Stopped, true));
+        assert!(!tun_runtime_active(CoreState::Starting, true));
+        assert!(!tun_runtime_active(CoreState::Running, false));
+        assert!(tun_runtime_active(CoreState::Running, true));
+    }
+
+    #[test]
+    fn autostart_elevation_policy_matches_platform_service_model() {
+        assert!(startup_allows_interactive_elevation(
+            StartupMode::Interactive
+        ));
+        #[cfg(target_os = "windows")]
+        assert!(startup_allows_interactive_elevation(StartupMode::Autostart));
+        #[cfg(not(target_os = "windows"))]
+        assert!(!startup_allows_interactive_elevation(
+            StartupMode::Autostart
+        ));
     }
 }

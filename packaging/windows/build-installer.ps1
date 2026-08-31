@@ -20,6 +20,20 @@ $projectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
 $manifestPath = Join-Path $projectRoot "Cargo.toml"
 $nsisScript = Join-Path $PSScriptRoot "installer.nsi"
 
+function Get-CanonicalUtf8TextSha256 {
+    param([Parameter(Mandatory)][string]$LiteralPath)
+
+    # Git 在 Windows 上可能把官方 LF 文本检出为 CRLF。许可证清单锚定上游
+    # UTF-8/LF 原文，因此仅规范换行后计算哈希；非法 UTF-8 仍会立即失败。
+    $bytes = [IO.File]::ReadAllBytes($LiteralPath)
+    $utf8 = [Text.UTF8Encoding]::new($false, $true)
+    $text = $utf8.GetString($bytes).Replace("`r`n", "`n").Replace("`r", "`n")
+    $canonicalBytes = $utf8.GetBytes($text)
+    return [Convert]::ToHexString(
+        [Security.Cryptography.SHA256]::HashData($canonicalBytes)
+    ).ToLowerInvariant()
+}
+
 Push-Location $projectRoot
 try {
     & cargo build --release
@@ -115,7 +129,7 @@ try {
     if ($kernelHash -ne $windowsTarget.binary_sha256) {
         throw "内置 Mihomo SHA-256 与 manifest 不一致。"
     }
-    $licenseHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $kernelLicense).Hash.ToLowerInvariant()
+    $licenseHash = Get-CanonicalUtf8TextSha256 -LiteralPath $kernelLicense
     if ($licenseHash -ne $kernelMetadata.license_sha256) {
         throw "Mihomo LICENSE SHA-256 与 manifest 不一致。"
     }
@@ -186,7 +200,7 @@ try {
         }
         $geodataPayloads += $geoSource
     }
-    $geodataLicenseHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $geodataLicense).Hash.ToLowerInvariant()
+    $geodataLicenseHash = Get-CanonicalUtf8TextSha256 -LiteralPath $geodataLicense
     if ($geodataLicenseHash -ne [string]$geodataMetadata.license_sha256) {
         throw "Geo 数据 LICENSE SHA-256 与 manifest 不一致。"
     }

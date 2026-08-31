@@ -65,12 +65,20 @@ impl AppShell {
         }
     }
 
-    /// 初始化主窗口和平台托盘；托盘失败不阻止窗口及代理核心启动。
-    pub(crate) fn start(&mut self, cx: &mut Context<Self>) {
-        self.open_or_focus_main_window(cx);
+    /// 初始化应用外壳。登录自启只安装托盘；交互启动同时创建主窗口。
+    pub(crate) fn start(&mut self, show_window: bool, cx: &mut Context<Self>) {
+        #[cfg(any(target_os = "windows", target_os = "linux"))]
+        let tray_ready = self.install_system_tray(cx);
+
+        if show_window {
+            self.open_or_focus_main_window(cx);
+        }
 
         #[cfg(any(target_os = "windows", target_os = "linux"))]
-        self.install_system_tray(cx);
+        if !show_window && !tray_ready {
+            // 零窗口模式若没有托盘将无法恢复或退出，立即清理业务资源并结束进程。
+            self.request_quit(cx);
+        }
     }
 
     /// 已有窗口时恢复并激活；窗口已销毁时把同一个长期业务实体挂到新窗口。
@@ -86,6 +94,9 @@ impl AppShell {
                 })
                 .is_ok()
         {
+            let _ = self
+                .runtime
+                .update(cx, |runtime, _| runtime.allow_interactive_elevation());
             return;
         }
 
@@ -102,6 +113,11 @@ impl AppShell {
             Ok(window_handle) => {
                 self.main_window = Some(window_handle);
                 cx.activate(true);
+                // Linux 登录自启不弹 polkit；用户明确打开窗口后，后续启用 TUN
+                // 才允许走交互授权。内核启动本身不会等待窗口。
+                let _ = self
+                    .runtime
+                    .update(cx, |runtime, _| runtime.allow_interactive_elevation());
             }
             Err(error) => eprintln!("无法创建 Pure Clash 主窗口：{error:#}"),
         }
@@ -124,12 +140,12 @@ impl AppShell {
     }
 
     #[cfg(any(target_os = "windows", target_os = "linux"))]
-    fn install_system_tray(&mut self, cx: &mut Context<Self>) {
+    fn install_system_tray(&mut self, cx: &mut Context<Self>) -> bool {
         let (system_tray, actions) = match SystemTray::new() {
             Ok(result) => result,
             Err(error) => {
                 eprintln!("初始化系统托盘失败：{error:#}");
-                return;
+                return false;
             }
         };
         self.system_tray = Some(system_tray);
@@ -147,6 +163,7 @@ impl AppShell {
             }
         })
         .detach();
+        true
     }
 
     /// 业务实体在有无窗口时都会发出通知；托盘状态因此始终反映真实运行状态。

@@ -1,7 +1,7 @@
 # Pure Clash 技术方案
 
 > 状态：迁移后的产品技术基线
-> 更新时间：2026-08-29
+> 更新时间：2026-08-31
 > 当前范围：Windows x64 与 Linux x64，均支持内核生命周期、系统代理与 TUN
 
 Pure Clash 是使用 Rust 和 Zed GPUI 构建的 Mihomo 原生桌面客户端。GPUI 负责界面与产品状态，Mihomo 作为独立进程负责代理协议、DNS、规则匹配与流量转发。
@@ -75,10 +75,12 @@ src/
   platform/
     mod.rs            # 平台目录、随包资源、内核文件名和窗口选项边界
     windows/
+      autostart.rs     # HKCU Run 登录自启注册与状态读取
       job.rs           # Job Object
       system_proxy.rs  # 当前用户系统代理快照、设置与恢复
       credential.rs    # Credential Manager 或 DPAPI
     linux/
+      autostart.rs     # XDG Autostart desktop entry 与 AppImage 路径处理
       child_guard.rs   # PR_SET_PDEATHSIG 父进程死亡守护，等价 Job Object 兑底
       elevation.rs     # TUN 服务客户端：启动/状态/停止 IPC 与内部模式分流
       tun_service.rs   # 一次授权服务安装、runtime bundle 物化与 root 内核守护
@@ -206,7 +208,7 @@ Linux 布局相同但二进制名为 `pc-mihomo`，内核文件随仓库提交�
 
 Windows 程序目录必须对当前用户可写；当前 per-user 安装位置满足该约束，不支持放入需要管理员权限才能写入的目录。Linux/macOS 不依赖应用资源目录可写，配置和运行数据进入用户目录。`app.json` 中每个字段都必须有默认值，缺失字段按默认值加载。订阅凭据、controller secret 和其他敏感字段在 Windows 进入 Credential Manager 或 DPAPI 保护的存储；其他平台需要使用对应系统凭据服务，`app.json` 只保存凭据引用。
 
-`config/mihomo/default.yaml` 作为编译期资源嵌入程序，只在运行目录缺少该文件时创建，不覆盖用户修改。默认配置仅监听 loopback 的 mixed port `7890`，策略组只包含 Mihomo 内置 `DIRECT` 出站；启动按钮固定把 `-f` 指向合并并校验后的 `config/mihomo/runtime.yaml`，把 `-d` 指向 `data/mihomo/`。
+`config/mihomo/default.yaml` 作为编译期资源嵌入程序，只在运行目录缺少该文件时创建，不覆盖用户修改。默认配置仅监听 loopback 的 mixed port `7890`，启用 `unified-delay` 与 `tcp-concurrent`，策略组只包含 Mihomo 内置 `DIRECT` 出站；这两个行为字段也由本地基线注入所有订阅合并产物。启动按钮固定把 `-f` 指向合并并校验后的 `config/mihomo/runtime.yaml`，把 `-d` 指向 `data/mihomo/`。
 
 配置页同时支持 URL 订阅和本地 YAML 导入。本地文件由 GPUI 原生文件选择器获取，Windows 使用系统对话框、Linux 通过 XDG portal、macOS 使用原生面板；应用只读取至多 10MB 的 UTF-8 内容并保存校验后的副本，不记录源路径。两种来源共用结构预检、本地基线合并、目标内核 `-t` 与原子保存链路，任一步失败均不改变现有 profile、runtime 或运行内核。本地配置引用的相对 provider/规则文件不会随导入复制，用户应选择可独立校验的配置或把资源放入 Mihomo 数据目录。
 
@@ -244,7 +246,7 @@ Windows 保存 `ProxyEnable` / `ProxyServer` 并经 WinINet 广播变更。Linux
 
 TUN 开关写入客户端本地基线，重新合并配置并用同版本 Mihomo 执行 `-t`，运行中的内核随后重启。Windows 通过 `runas` 触发 UAC，只提升 Mihomo 进程并使用随包 wintun。Linux 参考 Clash Verge Rev 的服务模型：首次启用通过 `pkexec` 重新执行内部安装器，验证 `PKEXEC_UID`、Pure Clash 父进程与随包内核后，把服务程序及锁定版本内核原子复制到 root 所有、普通用户不可写的 `/usr/libexec/pure-clash-service` 与 `/usr/lib/pure-clash/kernel/`，写入并启动 `pure-clash-service.service`；后续启停不再调用 `pkexec`。
 
-Linux 服务 socket 位于 `/run/pure-clash-service/service.sock`（`0660`，root 与授权用户私有组），服务通过 `SO_PEERCRED` 复核调用者 UID；IPC 为长度前缀 JSON，只接受 Ping/Start/Status/Stop 四个请求，不接受客户端传入内核路径，只能启动 `/usr/lib/pure-clash/kernel/` 下 root 所有的固定副本。Start 请求携带 runtime bundle：运行时 YAML、本地资源（provider 与 GeoSite/GeoIP/Country 数据）和远程 provider 列表。服务把 bundle 原子物化到 `/var/lib/pure-clash-service/users/<uid>/runtime`——资源来源必须属于授权用户且组/其他位不可写，目标路径禁止穿越、符号链接和保留名；物化以 `.pure-clash-runtime.json` 清单管理增量，先以锁定内核在运行目录内 `-t` 校验，再以 root 启动 Mihomo。对齐 Clash Verge Rev 当前服务模型，服务与内核保持 root 运行，不降 UID、不设置 ambient capabilities、不替换系统网络工具。服务负责进程守护，GUI PID 消失时自动回收内核，协议版本不匹配时强制重新走一次安装授权。Windows 继续用 Job Object 管理提权句柄。两端在 controller 就绪后读取 `/configs` 核对 TUN 真实生效状态。拒绝授权、缺少服务/wintun/polkit或 TUN 未生效时，客户端自动关闭 TUN、重新生成配置并以普通权限恢复内核。
+Linux 服务 socket 位于 `/run/pure-clash-service/service.sock`（`0660`，root 与授权用户私有组），服务通过 `SO_PEERCRED` 复核调用者 UID；IPC 为长度前缀 JSON，只接受 Ping/Start/Status/Stop 四个请求，不接受客户端传入内核路径，只能启动 `/usr/lib/pure-clash/kernel/` 下 root 所有的固定副本。Start 请求携带 runtime bundle：运行时 YAML、本地资源（provider 与 GeoSite/GeoIP/Country 数据）和远程 provider 列表。服务把 bundle 原子物化到 `/var/lib/pure-clash-service/users/<uid>/runtime`——资源来源必须属于授权用户且组/其他位不可写，目标路径禁止穿越、符号链接和保留名；物化以 `.pure-clash-runtime.json` 清单管理增量，先以锁定内核在运行目录内 `-t` 校验，再以 root 启动 Mihomo。对齐 Clash Verge Rev 当前服务模型，服务与内核保持 root 运行，不降 UID、不设置 ambient capabilities、不替换系统网络工具。服务负责进程守护，GUI PID 消失时自动回收内核，协议版本不匹配时强制重新走一次安装授权。Windows 继续用 Job Object 管理提权句柄。两端在 controller 就绪后读取 `/configs` 核对 TUN 真实生效状态。用户交互启动中拒绝授权、缺少服务/wintun/polkit 或 TUN 未生效时，客户端自动关闭 TUN、重新生成配置并以普通权限恢复内核；登录自启的无交互例外见 6.6。
 
 服务以 root 运行意味着 sing-tun 的 `resolvectl` 调用和 TUN 设备管理天然具备权限，无需任何 shim 或 capabilities 补丁。实际 DNS 接管对齐 Clash Verge Rev 的工作配置，由 Mihomo 的双栈 fake-IP、`dns-hijack: any:53` 与 auto-route 完成；桌面进程不使用 `nmcli device modify` 二次修改刚创建的虚拟网卡，只经 controller 核对 TUN 状态，避免路由切换期间引入 DNS 竞态。
 
@@ -260,11 +262,23 @@ Linux 桌面对左键语义不统一：SNI 规范下普遍弹出菜单（KDE 可
 
 ### 6.5 单实例
 
-Windows 在读取配置和启动 GPUI 前创建当前会话范围的 `Local\\` 命名 Mutex。首实例持续持有 Mutex；后续进程发现对象已存在后，只设置同一命名的自动重置 Event，然后立即退出。因此 debug、release、安装版和升级后的可执行文件使用相同应用身份，不会并行维护同一份配置或启动多份内核。
+Windows 在读取配置和启动 GPUI 前创建当前会话范围的 `Local\\` 命名 Mutex。首实例持续持有 Mutex；用户主动启动的后续进程发现对象已存在后，设置同一命名的自动重置 Event 并立即退出，登录自启的后续进程则不发送 Event。因此 debug、release、安装版和升级后的可执行文件使用相同应用身份，不会并行维护同一份配置或启动多份内核。
 
 首实例使用独立等待线程监听 Event，并通过有界异步通道把请求交给 GPUI 主线程；收到请求后调用 `AppShell` 恢复已有窗口，或在零窗口状态下创建新窗口并激活。自动重置 Event 可在首实例窗口尚未完成创建时保存一次并发启动信号，有界通道则合并短时间内的重复请求。应用退出时通过私有关闭 Event 唤醒并回收等待线程。
 
-Linux 使用抽象命名空间 Unix domain socket（名称按 UID 隔离多用户）：内核保证 `bind` 的原子性，监听成功即为首实例；后续实例 `connect` 到同名 socket 通知首实例后立即退出，连接建立本身即激活请求。接收线程以非阻塞轮询消费连接（关闭 `try_clone` 副本无法唤醒阻塞 accept），退出标志加 join 保证应用退出时回收线程；抽象 socket 随进程退出自动释放，无文件残留。macOS 尚未实现同等单实例锁，但 Dock reopen 已接入 `AppShell` 的窗口重建路径。
+Linux 使用抽象命名空间 Unix domain socket（名称按 UID 隔离多用户）：内核保证 `bind` 的原子性，监听成功即为首实例；用户主动启动的后续实例 `connect` 到同名 socket 通知首实例后立即退出，连接建立本身即激活请求，登录自启的后续实例只确认地址已占用并静默退出。接收线程以非阻塞轮询消费连接（关闭 `try_clone` 副本无法唤醒阻塞 accept），退出标志加 join 保证应用退出时回收线程；抽象 socket 随进程退出自动释放，无文件残留。macOS 尚未实现同等单实例锁，但 Dock reopen 已接入 `AppShell` 的窗口重建路径。
+
+### 6.6 登录自启
+
+设置页直接读取和修改平台登录项，不在 `app.json` 保存第二份布尔状态。Windows 使用当前用户 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` 下的 `PureClash` 字符串值，命令为带引号的当前 EXE 绝对路径加 `--autostart`，无需管理员权限；NSIS 卸载时删除该值。Linux 按 XDG Autostart 规范维护 `$XDG_CONFIG_HOME/autostart/pure-clash.desktop`，变量缺失或不是绝对路径时回退到 `~/.config/autostart`；desktop entry 的 `Exec` 参数按规范引用和转义。AppImage 的 `/proc/self/exe` 指向临时挂载目录，因此注册时优先使用 AppImage 运行时提供的 `$APPIMAGE` 原始绝对路径；文件被移动或改名后用户需要重新开关自启。macOS 本阶段不实现。
+
+`--autostart` 首实例创建长期业务实体、托盘并按持久配置启动内核，但不创建主窗口。Windows 恢复已配置 TUN 时允许弹出 UAC；用户拒绝授权或启动失败后，客户端关闭 TUN 配置并自动拉起普通内核。Linux 只有版本匹配且 Ping 成功的既有服务允许在后台静默启动 TUN；服务未安装、版本不匹配或不可达时不弹 polkit，同样关闭 TUN 配置并回退普通内核。后台模式若托盘初始化失败会恢复系统代理、回收内核并退出，避免留下不可操作的零窗口进程。
+
+TUN 的持久配置与运行状态必须分离：`local.yaml` 中的 `tun.enable` 只表示下一次启动意图，界面和托盘只有在内核进入 Running 且 controller `/configs` 确认 TUN 生效后才显示开启；启动中、停止、失败或重启期间一律显示关闭。这样不会出现内核未启动但 TUN 显示开启的伪状态。
+
+单实例请求区分来源：普通第二实例发送激活信号并唤起首实例窗口，`--autostart` 第二实例只确认已有进程后静默退出。因此先由登录项启动的后台实例仍可在用户稍后手动运行程序时创建窗口，已经打开的应用也不会被登录项重复打扰。
+
+实现依据：[Windows Run/RunOnce](https://learn.microsoft.com/en-us/windows/win32/setupapi/run-and-runonce-registry-keys)、[XDG Autostart](https://specifications.freedesktop.org/autostart-spec/latest/)、[Desktop Entry Exec](https://specifications.freedesktop.org/desktop-entry-spec/latest/exec-variables.html)、[AppImage 运行时变量](https://docs.appimage.org/packaging-guide/environment-variables.html)。
 
 ## 7. 内核供应链与许可证
 
@@ -318,7 +332,7 @@ targets.<os-arch>：
 
 ### Phase 2：桌面 MVP（当前阶段）
 
-已完成：总览/代理/连接/配置/设置五页真实数据；URL 订阅下载与本地 YAML 导入、更新、删除和激活；节点选择与模式切换；连接列表与实时流量（1 秒轮询差分）；连接关闭；单节点与整组延迟测试；Windows/Linux 系统代理托管与自愈；托盘、单实例与国际化。
+已完成：总览/代理/连接/配置/设置五页真实数据；URL 订阅下载与本地 YAML 导入、更新、删除和激活；节点选择与模式切换；连接列表与实时流量（1 秒轮询差分）；连接关闭；单节点与整组延迟测试；Windows/Linux 系统代理托管与自愈；托盘、单实例、登录自启与国际化。
 
 待实现：规则页、日志/内存监控、订阅历史回滚、内核下载与版本回滚。
 

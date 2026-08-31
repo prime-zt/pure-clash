@@ -32,6 +32,19 @@ pub(super) fn render_settings(
                     palette,
                 ))
                 .child(setting_row(
+                    "setting-autostart",
+                    tr("settings.autostart"),
+                    if app.autostart_available {
+                        tr("settings.autostart_detail")
+                    } else {
+                        tr("settings.autostart_unavailable")
+                    },
+                    app.autostart_enabled,
+                    app.autostart_available,
+                    palette,
+                    cx.listener(|this, _, _, cx| this.toggle_autostart(cx)),
+                ))
+                .child(setting_row(
                     "setting-system-proxy",
                     tr("settings.system_proxy"),
                     tr("settings.system_proxy_detail"),
@@ -44,7 +57,7 @@ pub(super) fn render_settings(
                     "setting-tun",
                     tr("settings.tun"),
                     tr("settings.tun_detail"),
-                    app.tun_enabled,
+                    app.tun_running(),
                     true,
                     palette,
                     cx.listener(|this, _, _, cx| this.toggle_tun(cx)),
@@ -248,7 +261,6 @@ fn setting_row(
                 .rounded_full()
                 .flex()
                 .items_center()
-                .cursor_pointer()
                 .bg(if enabled {
                     palette.accent
                 } else {
@@ -257,7 +269,9 @@ fn setting_row(
                 .when(enabled, |toggle| toggle.justify_end())
                 .when(!enabled, |toggle| toggle.justify_start())
                 .child(div().size_4().rounded_full().bg(palette.surface))
-                .on_click(handler),
+                .when(available, |toggle| {
+                    toggle.cursor_pointer().on_click(handler)
+                }),
         )
         .into_any_element()
 }

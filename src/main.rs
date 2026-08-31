@@ -14,6 +14,7 @@ mod kernel;
 mod mihomo;
 mod platform;
 mod profile;
+mod startup;
 mod theme;
 mod ui;
 
@@ -21,6 +22,7 @@ use app::{AppShell, PureClash};
 use assets::Assets;
 use gpui::{App, QuitMode, prelude::*};
 use gpui_platform::application;
+use startup::StartupMode;
 
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 use platform::{SingleInstance, SingleInstanceState};
@@ -38,10 +40,15 @@ fn main() {
         }
     }
 
-    // 当前用户会话只允许一个 Pure Clash 实例；后续启动只通知首实例恢复窗口。
+    let startup_mode = StartupMode::from_env();
+
+    // 当前用户会话只允许一个 Pure Clash 实例；登录自启的次实例静默退出，
+    // 用户主动启动的次实例才通知首实例恢复窗口。
     #[cfg(any(target_os = "windows", target_os = "linux"))]
     let (_single_instance, activation_requests) =
-        match SingleInstance::acquire().expect("无法初始化 Pure Clash 单实例控制") {
+        match SingleInstance::acquire(startup_mode.notify_existing_instance())
+            .expect("无法初始化 Pure Clash 单实例控制")
+        {
             SingleInstanceState::Primary {
                 guard,
                 activation_requests,
@@ -67,9 +74,11 @@ fn main() {
         ui::bind_input_keys(cx);
 
         // 业务实体与进程同生命周期；窗口关闭和重建都复用它，避免重复启动内核及轮询。
-        let runtime = cx.new(|cx| PureClash::new(loaded_config, cx));
+        let runtime = cx.new(|cx| PureClash::new(loaded_config, startup_mode, cx));
         let shell = AppShell::install(runtime, cx);
-        shell.update(cx, |shell, cx| shell.start(cx));
+        shell.update(cx, |shell, cx| {
+            shell.start(startup_mode.show_initial_window(), cx)
+        });
 
         #[cfg(any(target_os = "windows", target_os = "linux"))]
         install_single_instance_listener(activation_requests, cx);
