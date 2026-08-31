@@ -1,0 +1,4 @@
+# Zed 的 Linux 字体后端支持动态加载 Fontconfig；构建时无需依赖
+# fontconfig.pc，运行时仍由系统提供 libfontconfig。
+[env]
+RUST_FONTCONFIG_DLOPEN = "1"

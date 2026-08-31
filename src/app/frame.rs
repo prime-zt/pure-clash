@@ -94,6 +94,7 @@ pub(super) fn linux_client_side_decorations(
                                 offset: point(px(0.0), px(0.0)),
                                 blur_radius: CLIENT_SIDE_DECORATION_SIZE / 2.0,
                                 spread_radius: px(0.0),
+                                inset: false,
                             }])
                         })
                 })
