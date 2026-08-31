@@ -31,9 +31,9 @@ pub(crate) use process_guard::KernelProcessGuard;
 pub(crate) use tray::{SystemTray, TrayAction};
 
 #[cfg(target_os = "linux")]
-pub(crate) use linux::{hide_main_window, show_main_window};
+pub(crate) use linux::show_main_window;
 #[cfg(target_os = "windows")]
-pub(crate) use windows::{hide_main_window, show_main_window};
+pub(crate) use windows::show_main_window;
 
 #[cfg(target_os = "linux")]
 pub(crate) use linux::{SingleInstance, SingleInstanceState};

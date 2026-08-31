@@ -10,7 +10,7 @@
 ## 核心模块
 
 - `src/main.rs`：应用入口、快捷键和原生窗口创建。
-- `src/app/`：界面模块。`mod.rs` 持有 Pure Clash 状态与业务逻辑（内核生命周期、系统代理/TUN、订阅管线、后台任务与共享渲染助手），渲染按区域拆分子模块：`frame.rs`（标题栏、状态徽标、窗口按钮、Linux 客户端装饰）、`sidebar.rs`（侧栏与内核卡片）、`header.rs`（页面路由与页头开关芯片）、`overview.rs`/`proxies.rs`/`connections.rs`/`profiles.rs`/`settings.rs`/`about.rs`（五个基础页面加关于页，含版本、源码仓库、开源组件清单与 GitHub Releases 更新检查）。子模块经 `use super::*` 访问父模块的私有状态，跨页面复用的小组件（连接行、横幅等）以 `pub(super)` 暴露。
+- `src/app/`：界面模块。`mod.rs` 持有 Pure Clash 状态与业务逻辑（内核生命周期、系统代理/TUN、订阅管线、后台任务与共享渲染助手），`shell.rs` 的 `AppShell` 持有长期业务实体、托盘和可重建的主窗口句柄；渲染按区域拆分子模块：`frame.rs`（标题栏、状态徽标、窗口按钮、Linux 客户端装饰）、`sidebar.rs`（侧栏与内核卡片）、`header.rs`（页面路由与页头开关芯片）、`overview.rs`/`proxies.rs`/`connections.rs`/`profiles.rs`/`settings.rs`/`about.rs`（五个基础页面加关于页，含版本、源码仓库、开源组件清单与 GitHub Releases 更新检查）。子模块经 `use super::*` 访问父模块的私有状态，跨页面复用的小组件（连接行、横幅等）以 `pub(super)` 暴露。
 - `src/config.rs`：`AppConfig`、程序目录初始化、`config/app.json` 读取与即时原子持久化；通过随包版本 marker 迁移仍跟随旧随包内核的配置。
 - `src/platform/mod.rs`：跨平台目录、内核进程守护接口、托盘抽象和主窗口装饰策略；各平台行为差异统一从这里解析。`src/platform/file.rs` 提供 Windows `MoveFileExW` 与 unix `rename` 的同目录原子替换。
 - `src/platform/windows/job.rs`：Windows Mihomo 专用 Job Object，启用 `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`。
@@ -22,8 +22,8 @@
 - `src/platform/tray.rs`：平台无关托盘抽象，定义 `TrayAction` 并按平台导出同名 `SystemTray`。
 - `src/platform/windows/tray.rs`：Windows 系统托盘，复用 EXE 应用图标，转发单击与右键菜单事件并动态更新运行状态提示。
 - `src/platform/linux/tray.rs`：Linux 托盘，基于 ksni（SNI/DBus 纯 Rust 实现）提供图标、菜单和状态文本，与 Windows 行为对齐。
-- `src/platform/linux/window_ctrl.rs`：Linux 主窗口最小化（关闭到托盘）与激活恢复，衔接 Wayland/X11 差异。
-- `src/platform/windows/window_ctrl.rs`：Windows 主窗口隐藏与显示恢复，支撑“关闭到托盘”与托盘唤起。
+- `src/platform/linux/window_ctrl.rs`：Linux 主窗口重建后的显示与激活，衔接 Wayland/X11 差异。
+- `src/platform/windows/window_ctrl.rs`：Windows 主窗口重建后的显示与激活，支撑托盘唤起。
 - `src/mihomo/process.rs`：使用 `-t` 校验默认配置，按 `-d` / `-f` 启停真实内核并回收子进程；平台进程管理全部委托 `platform::KernelProcessGuard`，模块内不含平台分支。
 - `config/mihomo/default.yaml`：嵌入程序的首次启动默认配置，仅包含一个内置 `DIRECT` 节点。
 - `src/profile.rs`：URL 订阅和本地配置文件的读取、大小/编码限制、结构校验、落盘与运行时配置同步管线。
@@ -42,7 +42,7 @@
 
 ## 技术栈、目录与约定
 
-- Rust 2024 edition；`gpui = 0.2.2`；`rust-i18n = 4.2.1`；Windows 托盘使用 `tray-icon = 0.24.2`；unix 目标使用 `libc` 发送 SIGTERM 与设置父进程死亡信号；非 Windows 目标使用 `directories = 6.0` 解析标准用户目录。
+- Rust 2024 edition；GPUI 使用 Zed `v1.17.2` 对应提交 `c8e44cfa7bda9b2e22c8d6934d78969352e7f61a`，平台后端使用同提交的 `gpui_platform`；`rust-i18n = 4.2.1`；Windows 托盘使用 `tray-icon = 0.24.2`；unix 目标使用 `libc` 发送 SIGTERM 与设置父进程死亡信号；非 Windows 目标使用 `directories = 6.0` 解析标准用户目录。
 - UI、业务说明和代码注释使用中文；协议字段、类型名和函数名保留英文。
 - Cargo/可执行文件/安装包前缀统一为 `pure-clash`，界面和 Windows 发行名统一为 `Pure Clash`。
 - 保持单包、小依赖；平台无关路径留在 `src/platform/mod.rs`，只有实际接入系统代理、凭据、进程监管等能力时才新增 `src/platform/windows/`、`linux/` 或 `macos/` 子模块。
@@ -77,9 +77,9 @@
 - Pure Clash 项目自身代码以 GPL-3.0 发布：根目录 `LICENSE` 是唯一许可文本，Cargo 声明 `license = "GPL-3.0"`，修改代码不得移除或弱化许可证声明。随包 Mihomo 内核同样使用 GPL-3.0，义务经 `kernel/<版本>/` 目录内的 `LICENSE`、`NOTICE.md` 与 `manifest.json` 源码地址履行，安装器随内核一并安装。`Pure Clash` 名称不包含上游限制的 `mihomo` 字样。
 - 使用 `include_bytes!` 和自定义 `AssetSource` 嵌入 SVG；Windows 无边框窗口使用 GPUI `WindowControlArea` 和自绘窗口按钮；Linux Wayland 使用参考 Zed 的客户端装饰，包含窗口按钮、拖动、缩放、圆角和阴影，X11 不支持时回退系统装饰；macOS 保留原生标题栏。
 - Windows 应用图标由 `assets/icons/app.svg` 派生为 `assets/windows/pure-clash.ico`；ICO 包含多分辨率帧，并统一用于 GPUI 自绘标题栏、EXE 资源、快捷方式及 NSIS 安装器/卸载器。
-- 托盘在 Windows 和 Linux 上提供一致体验：单击图标或菜单“打开”显示并激活主窗口，悬浮提示/状态文本按当前语言同步内核、系统代理和 TUN 的真实状态，并在相关开关变化后立即更新。关闭主窗口是隐藏到托盘而不是退出，内核与托盘继续运行；托盘菜单“退出”先恢复系统代理、回收内核再真实结束应用。Linux 差异：SNI 桌面普遍把左键用于弹出菜单（KDE 等会触发 Activate）；GNOME 需要 AppIndicator 扩展，且顶栏不显示 tooltip，状态改由 SNI Title 承担；“关闭到托盘”是最小化到概览（Wayland 无隐藏协议），托盘“打开”在 X11 可靠恢复最小化窗口，Wayland 依赖 xdg_activation、部分合成器可能拒绝。
+- 托盘在 Windows 和 Linux 上提供一致体验：单击图标或菜单“打开”显示并激活主窗口，悬浮提示/状态文本按当前语言同步内核、系统代理和 TUN 的真实状态，并在相关开关变化后立即更新。主窗口关闭会真正销毁原生窗口及窗口渲染资源，但 `AppShell`、托盘、业务实体和内核继续运行；托盘菜单“打开”、第二实例唤起以及 macOS Dock reopen 会重新创建并激活窗口，托盘菜单“退出”先恢复系统代理、回收内核再真实结束应用。Linux 差异：SNI 桌面普遍把左键用于弹出菜单（KDE 等会触发 Activate）；GNOME 需要 AppIndicator 扩展，且顶栏不显示 tooltip，状态改由 SNI Title 承担；Wayland 依赖 xdg_activation，部分合成器可能拒绝托盘来源的激活请求。
 - 当前用户会话只允许一个 Pure Clash 实例：Windows 用 `Local\\` 命名 Mutex + 自动重置 Event，Linux 用抽象命名空间 Unix socket（按 UID 隔离多用户，内核保证 bind 原子性，进程退出自动释放）；后续进程通知首实例后于配置初始化和 GPUI 启动前退出，首实例把通知转交 GPUI 主线程恢复并激活主窗口。macOS 尚未实现对应单实例锁。
-- GPUI 0.2.2 的 `svg()` 元素按单色 alpha mask 绘制且必须设置 `text_color`；带背景色的 `app.svg` 在标题栏中必须使用 `img()`，其他单色界面图标继续使用 `svg()`。
+- 当前锁定 GPUI 的 `svg()` 元素按单色 alpha mask 绘制且必须设置 `text_color`；带背景色的 `app.svg` 在标题栏中必须使用 `img()`，其他单色界面图标继续使用 `svg()`。GPUI 应升级前按目标提交的官方示例核对 API。
 - Windows release 使用 GUI 子系统，debug 保留控制台；NSIS 继续采用 per-user 安装模型。TUN 等提权能力不得借此安装器静默获取管理员权限。
 - 当前实现的平台能力：Windows x64 支持内核启停、系统代理、TUN、托盘与单实例；Linux x64 支持内核启停（异常退出由 pdeathsig 回收）、GNOME/Cinnamon `gsettings` 系统代理、基于 polkit 一次授权 root systemd 服务的 TUN（对齐 Clash Verge Rev 的服务模型）、SNI 托盘（GNOME 需 AppIndicator 扩展）与单实例，其中 Linux TUN 已在 Fedora 44 x64（Wayland/GNOME）完成真实路由/DNS 授权验证，其他桌面与发行版未经实测。Linux 凭据存储仍未实现，deb/rpm/AppImage 由 GitHub Actions 在推送标签时构建并发布 Release；macOS 只完成目录、资源路径与窗口装饰边界预留。
 - 页面上的内核启动/停止已接入真实 Mihomo 进程；启动固定使用 `config/mihomo/runtime.yaml` 和 `data/mihomo/`，并先以同一内核执行 `-t`。应用启动时按 `app.json` 记录的激活配置自动拉起内核；runtime 合并、`-t` 或原子提交任一步失败时保留旧文件且不得启动/重启内核，profile 激活态只在 runtime 提交成功后更新。runtime.yaml 由客户端本地基线 `config/mihomo/local.yaml`（含随机 controller secret，禁止写入日志）与激活的配置文件合并生成，端口等本机字段一律以本地基线为准，订阅不得开启 TUN。配置页首行是内置默认配置（仅 `DIRECT` 出站，`active_profile` 为空即选中态，点击经同一 `-t` 链路切回），其下支持 URL 订阅下载以及 GPUI 原生文件选择器导入本地 YAML；两种来源共用结构预检、同版本内核 `-t`、原子保存与激活链路，远程订阅另支持更新，所有配置均可删除与切换。导入只保存内容副本，不记录源路径或复制其相对引用资源。激活/切换配置会真实重启内核；代理页与运行模式切换通过仅回环的 external controller（`PATCH /configs`、`GET/PUT /proxies`）真实生效，节点/分组延迟测试用 `GET /proxies/{name}/delay` 与 `GET /group/{name}/delay`（gstatic 204 探测、5 秒超时，手动结果覆盖 /proxies 历史值，失败显示超时）。连接与流量为真实实现：应用常驻任务每秒轮询 `GET /connections`，差分累计字节数得到实时网速，连接列表支持单条与全部关闭（`DELETE /connections[/{id}]`），渲染上限 200 行；响应中 `connections` 可为 null、失败延迟记为 0，解析时均已兜底，接口字段以官方文档和内核实测为准。设置页展示真实 controller 地址；系统代理与 TUN 开关为真实实现，标题栏以同款徽标展示两者开关状态。

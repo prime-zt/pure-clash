@@ -281,7 +281,7 @@ pub(super) fn render_titlebar(
         .child(language_button(app.config.language, palette, cx))
         .child(theme_button(app.config.theme.is_dark(), palette, cx));
 
-    // GPUI 0.2.2 的 overflow 裁剪不包含圆角，实际着色的标题栏也必须应用上圆角，
+    // 当前 GPUI 的 overflow 裁剪不包含圆角，实际着色的标题栏也必须应用上圆角，
     // 否则它会越过外框的圆角，在透明阴影区留下实心直角像素。
     #[cfg(target_os = "linux")]
     let titlebar = match window.window_decorations() {
@@ -317,7 +317,7 @@ pub(super) fn render_titlebar(
             palette,
         ));
 
-    // GPUI 0.2.2 在 Linux 客户端装饰模式下不绘制窗口控件，由应用补齐标准操作。
+    // Linux 客户端装饰模式下不绘制窗口控件，由应用补齐标准操作。
     #[cfg(target_os = "linux")]
     let titlebar = if let Decorations::Client { tiling } = window.window_decorations() {
         titlebar
@@ -343,11 +343,9 @@ pub(super) fn render_titlebar(
                 true,
                 !tiling.top && !tiling.right,
                 palette,
-                cx.listener(|this, _, window, _| {
-                    // 与 Windows 一致：关闭按钮隐藏到托盘，真实退出必须走托盘菜单，
-                    // 避免窗口销毁时内核和托盘意外残留或丢失。
-                    hide_main_window(window);
-                    this.refresh_tray_texts();
+                cx.listener(|_, _, window, _| {
+                    // AppShell 持有长期业务状态；这里只销毁窗口及其平台渲染资源。
+                    window.remove_window();
                 }),
             ))
     } else {

@@ -62,7 +62,17 @@ assets = [
 anyhow = "1.0"
 # 托盘事件经无界通道转交 GPUI 主线程，避免在平台回调线程里直接操作界面状态。
 async-channel = "2.5"
-gpui = "0.2.2"
+gpui = {
+    # GPUI 位于 Zed monorepo；固定稳定版 tag 对应提交，确保 Linux
+    # 零窗口存活的 QuitMode API 与构建结果可复现。
+    git = "https://github.com/zed-industries/zed.git",
+    rev = "c8e44cfa7bda9b2e22c8d6934d78969352e7f61a"
+}
+# 最新 GPUI 将平台后端工厂放在同一 monorepo 的 gpui_platform 包中。
+gpui_platform = {
+    git = "https://github.com/zed-industries/zed.git",
+    rev = "c8e44cfa7bda9b2e22c8d6934d78969352e7f61a"
+}
 rust-i18n = "4.2.1"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

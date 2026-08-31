@@ -1,6 +1,6 @@
 //! 单行文本输入组件。
 //!
-//! GPUI 0.2.2 没有内置输入组件，本实现参照官方 `examples/input.rs` 移植：
+//! 当前锁定的 GPUI 没有内置输入组件，本实现参照官方 `examples/input.rs` 移植：
 //! 通过 [`EntityInputHandler`] 接入平台 IME 与剪贴板，动作键经 KeyBinding 分发，
 //! 渲染交给父级容器控制样式。
 
@@ -588,8 +588,15 @@ impl Element for TextElement {
             window.paint_quad(selection)
         }
         let line = prepaint.line.take().unwrap();
-        line.paint(bounds.origin, window.line_height(), window, cx)
-            .unwrap();
+        line.paint(
+            bounds.origin,
+            window.line_height(),
+            gpui::TextAlign::Left,
+            None,
+            window,
+            cx,
+        )
+        .unwrap();
 
         if focus_handle.is_focused(window)
             && let Some(cursor) = prepaint.cursor.take()

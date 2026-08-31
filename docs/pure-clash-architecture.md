@@ -250,9 +250,11 @@ Linux 服务 socket 位于 `/run/pure-clash-service/service.sock`（`0660`，roo
 
 开启 TUN 时本地基线注入 `gvisor` 栈、`auto-route`、自动网卡检测、DNS 劫持和完整双栈 fake-IP DNS；设备名与 TUN 地址沿用 Mihomo 默认值，避免偏离锁定内核与 Clash Verge Rev 已验证的 Linux 行为。关闭时移除客户端 DNS 注入并禁止订阅自行开启 TUN。检测到其他 Mihomo `Meta` TUN 设备时直接拒绝启动；同一时间运行多个 TUN 客户端仍可能争用策略路由表，不属于支持场景。休眠、网络切换、服务升级/卸载和发行包级恢复仍需在各目标桌面做进一步验证。
 
-### 6.4 系统托盘
+### 6.4 系统托盘与窗口生命周期
 
-GPUI 0.2.2 没有系统托盘 API，Windows 目标使用 `tray-icon 0.24.2`，Linux 目标使用 `ksni 0.3`（纯 Rust 的 StatusNotifierItem/DBus 实现，不依赖 GTK 和主线程）。托盘对象由主页面状态长期持有，应用状态销毁后自动移除图标；单击只恢复并激活已存在的主窗口。Linux 桌面对左键语义不统一：SNI 规范下普遍弹出菜单（KDE 可能触发 Activate），因此菜单“打开”项是主入口，Activate 同时接到同一动作。GNOME 需要 AppIndicator 扩展；顶栏不展示 tooltip 时状态由 SNI Title 承担。托盘“关闭到托盘”在 Linux 上是最小化到概览（Wayland 无隐藏协议），恢复窗口在 X11 走 EWMH 可靠完成，Wayland 依赖 xdg_activation 且可能被合成器拒绝。
+当前 GPUI 没有系统托盘 API，Windows 目标使用 `tray-icon 0.24.2`，Linux 目标使用 `ksni 0.3`（纯 Rust 的 StatusNotifierItem/DBus 实现，不依赖 GTK 和主线程）。托盘对象与长期业务实体由应用级 `AppShell` 持有，不依赖主窗口是否存在。GPUI 使用 `QuitMode::Explicit`：关闭最后一个窗口只销毁原生窗口、渲染资源和窗口句柄，不结束应用事件循环，因此 Mihomo、后台轮询、托盘和 `AppShell` 继续存活。托盘菜单“打开”、Windows/Linux 第二实例唤起以及 macOS Dock reopen 统一调用 `AppShell::open_or_focus_main_window`，在无窗口状态下把同一个业务实体挂到新窗口，避免重复启动内核或重复创建轮询任务。
+
+Linux 桌面对左键语义不统一：SNI 规范下普遍弹出菜单（KDE 可能触发 Activate），因此菜单“打开”项是主入口，Activate 同时接到同一动作。GNOME 需要 AppIndicator 扩展；顶栏不展示 tooltip 时状态由 SNI Title 承担。Wayland 依赖 `xdg_activation`，部分合成器可能拒绝托盘来源的激活请求；X11 可正常恢复并激活新建窗口。
 
 悬浮提示按当前语言展示内核、系统代理和 TUN 的真实状态，并在内核启停、系统代理/TUN 开关及语言切换后同步更新。
 
@@ -260,9 +262,9 @@ GPUI 0.2.2 没有系统托盘 API，Windows 目标使用 `tray-icon 0.24.2`，Li
 
 Windows 在读取配置和启动 GPUI 前创建当前会话范围的 `Local\\` 命名 Mutex。首实例持续持有 Mutex；后续进程发现对象已存在后，只设置同一命名的自动重置 Event，然后立即退出。因此 debug、release、安装版和升级后的可执行文件使用相同应用身份，不会并行维护同一份配置或启动多份内核。
 
-首实例使用独立等待线程监听 Event，并通过有界异步通道把请求交给 GPUI 主线程；收到请求后恢复最小化窗口并激活。自动重置 Event 可在首实例窗口尚未完成创建时保存一次并发启动信号，有界通道则合并短时间内的重复请求。应用退出时通过私有关闭 Event 唤醒并回收等待线程。
+首实例使用独立等待线程监听 Event，并通过有界异步通道把请求交给 GPUI 主线程；收到请求后调用 `AppShell` 恢复已有窗口，或在零窗口状态下创建新窗口并激活。自动重置 Event 可在首实例窗口尚未完成创建时保存一次并发启动信号，有界通道则合并短时间内的重复请求。应用退出时通过私有关闭 Event 唤醒并回收等待线程。
 
-Linux 使用抽象命名空间 Unix domain socket（名称按 UID 隔离多用户）：内核保证 `bind` 的原子性，监听成功即为首实例；后续实例 `connect` 到同名 socket 通知首实例后立即退出，连接建立本身即激活请求。接收线程以非阻塞轮询消费连接（关闭 `try_clone` 副本无法唤醒阻塞 accept），退出标志加 join 保证应用退出时回收线程；抽象 socket 随进程退出自动释放，无文件残留。macOS 尚未实现同等语义。
+Linux 使用抽象命名空间 Unix domain socket（名称按 UID 隔离多用户）：内核保证 `bind` 的原子性，监听成功即为首实例；后续实例 `connect` 到同名 socket 通知首实例后立即退出，连接建立本身即激活请求。接收线程以非阻塞轮询消费连接（关闭 `try_clone` 副本无法唤醒阻塞 accept），退出标志加 join 保证应用退出时回收线程；抽象 socket 随进程退出自动释放，无文件残留。macOS 尚未实现同等单实例锁，但 Dock reopen 已接入 `AppShell` 的窗口重建路径。
 
 ## 7. 内核供应链与许可证
 

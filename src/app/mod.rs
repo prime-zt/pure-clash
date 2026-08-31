@@ -27,17 +27,12 @@ use crate::{
         geodata::{GeodataInfo, UpdateOutcome},
     },
     platform::{
-        AppPaths, SystemProxySnapshot, SystemTray, capture_system_proxy, restore_system_proxy,
-        set_system_proxy,
+        AppPaths, SystemProxySnapshot, capture_system_proxy, restore_system_proxy, set_system_proxy,
     },
     profile,
     theme::{FontWeightExt, Palette},
     ui::TextInput,
 };
-
-/// Linux 关闭按钮在应用内隐藏窗口；Windows 由原生 WM_CLOSE 拦截处理。
-#[cfg(target_os = "linux")]
-use crate::platform::hide_main_window;
 
 impl PureClash {
     /// 应用当前版本；与 Cargo 包版本保持一致，供更新检查比较。
@@ -65,7 +60,10 @@ mod overview;
 mod profiles;
 mod proxies;
 mod settings;
+mod shell;
 mod sidebar;
+
+pub(crate) use shell::AppShell;
 
 #[cfg(target_os = "linux")]
 use frame::linux_client_side_decorations;
@@ -168,6 +166,13 @@ enum CoreState {
     Running,
 }
 
+/// 应用外壳用于刷新平台托盘的完整文案快照。
+pub(super) struct TrayTexts {
+    pub(super) tooltip: String,
+    pub(super) open: String,
+    pub(super) quit: String,
+}
+
 /// 连接页单次渲染的最大行数；超出部分提示条数，避免超大订阅拖慢布局。
 const CONNECTIONS_RENDER_LIMIT: usize = 200;
 /// 实时连接与流量的轮询间隔；与内核 dashboard 的默认推送节奏一致。
@@ -246,8 +251,6 @@ pub(crate) struct PureClash {
     update_available: bool,
     /// 关于页检查更新的结果文案；None 表示尚未检查。
     update_status: Option<SharedString>,
-    /// 平台托盘句柄必须与应用状态同生命周期持有，释放后系统会移除图标。
-    system_tray: Option<SystemTray>,
 }
 
 impl PureClash {
@@ -349,7 +352,6 @@ impl PureClash {
             update_checking: false,
             update_available: false,
             update_status: None,
-            system_tray: None,
         };
         // 开机即按上次记录的激活配置启动内核；失败时只在界面提示，不阻断打开。
         // 新 runtime 未经校验或未能原子提交时不得沿用磁盘上的旧文件启动。
@@ -375,14 +377,8 @@ impl PureClash {
         self.core_state != CoreState::Stopped
     }
 
-    /// 主窗口创建后挂载平台托盘，并立即同步当前运行状态。
-    pub(crate) fn attach_system_tray(&mut self, system_tray: SystemTray) {
-        self.system_tray = Some(system_tray);
-        self.refresh_tray_texts();
-    }
-
-    /// 用当前语言同步托盘提示和右键菜单，并展示内核、系统代理与 TUN 三项状态。
-    fn refresh_tray_texts(&self) {
+    /// 生成当前语言下的托盘状态文案；托盘所有权由应用级 AppShell 持有。
+    pub(super) fn tray_texts(&self) -> TrayTexts {
         let core = match self.core_state {
             CoreState::Running => t!("tray.running"),
             CoreState::Starting => t!("app.core_starting"),
@@ -398,18 +394,16 @@ impl PureClash {
         } else {
             t!("tray.off")
         };
-        let tooltip = t!(
-            "tray.tooltip",
-            core = core,
-            system_proxy = system_proxy,
-            tun = tun
-        );
-
-        if let Some(system_tray) = &self.system_tray {
-            if let Err(error) = system_tray.set_tooltip(&tooltip) {
-                eprintln!("更新托盘状态失败：{error:#}");
-            }
-            system_tray.set_menu_texts(&t!("tray.menu_open"), &t!("tray.menu_quit"));
+        TrayTexts {
+            tooltip: t!(
+                "tray.tooltip",
+                core = core,
+                system_proxy = system_proxy,
+                tun = tun
+            )
+            .into_owned(),
+            open: t!("tray.menu_open").into_owned(),
+            quit: t!("tray.menu_quit").into_owned(),
         }
     }
 
@@ -567,7 +561,6 @@ impl PureClash {
             return;
         }
 
-        self.refresh_tray_texts();
         // 更新结果文案绑定生成时的 locale，切换语言后清空以避免混合显示。
         self.geodata_status = None;
         // 输入框占位文案在实体创建时固定，语言切换后按新 locale 重建。
@@ -589,7 +582,6 @@ impl PureClash {
         } else {
             self.start_core(cx);
         }
-        self.refresh_tray_texts();
         cx.notify();
     }
 
@@ -606,7 +598,6 @@ impl PureClash {
         let generation = self.core_start_generation;
         self.core_state = CoreState::Starting;
         self.mihomo_error = None;
-        self.refresh_tray_texts();
         cx.notify();
 
         let paths = self.paths.clone();
@@ -691,7 +682,6 @@ impl PureClash {
                         self.integration_error = Some(fallback_message);
                         self.start_core(cx);
                     }
-                    self.refresh_tray_texts();
                     cx.notify();
                     return;
                 }
@@ -701,7 +691,6 @@ impl PureClash {
                 self.mihomo_error = Some(t!("app.core_start_failed", error = detail).into_owned());
             }
         }
-        self.refresh_tray_texts();
         cx.notify();
     }
 
@@ -751,7 +740,6 @@ impl PureClash {
                         concise_error(&format!("{message}；回退配置失败：{revert_error:#}"), 220)
                     }
                 });
-                this.refresh_tray_texts();
                 cx.notify();
             });
         })
@@ -787,7 +775,6 @@ impl PureClash {
                     Ok(()) => {
                         this.core_state = CoreState::Running;
                         this.mihomo_error = None;
-                        this.refresh_tray_texts();
                         this.fetch_runtime_state(cx);
                         this.verify_tun_effective(generation, cx);
                     }
@@ -821,7 +808,6 @@ impl PureClash {
                             }
                             None => start_error,
                         });
-                        this.refresh_tray_texts();
                         cx.notify();
                     }
                 }
@@ -1123,13 +1109,11 @@ impl PureClash {
             // UAC/校验线程无法安全强制取消；使其结果过期，并把多次重启合并为一次。
             self.core_start_generation = self.core_start_generation.wrapping_add(1);
             self.core_restart_pending = true;
-            self.refresh_tray_texts();
             cx.notify();
             return;
         }
         self.stop_core();
         self.start_core(cx);
-        self.refresh_tray_texts();
         cx.notify();
     }
 
@@ -1176,13 +1160,11 @@ impl PureClash {
         if !self.system_proxy {
             if !self.mihomo_running() {
                 self.integration_error = Some(t!("app.system_proxy_requires_core").into_owned());
-                self.refresh_tray_texts();
                 cx.notify();
                 return;
             }
             let Some(baseline) = self.baseline.clone() else {
                 self.integration_error = Some(t!("app.baseline_missing").into_owned());
-                self.refresh_tray_texts();
                 cx.notify();
                 return;
             };
@@ -1199,7 +1181,6 @@ impl PureClash {
         } else {
             self.disable_system_proxy();
         }
-        self.refresh_tray_texts();
         cx.notify();
     }
 
@@ -1241,24 +1222,20 @@ impl PureClash {
         let enabled = !self.tun_enabled;
         if enabled && !self.mihomo_running() {
             self.integration_error = Some(t!("app.tun_requires_core").into_owned());
-            self.refresh_tray_texts();
             cx.notify();
             return;
         }
         let Some(_) = self.baseline.as_ref() else {
             self.integration_error = Some(t!("app.baseline_missing").into_owned());
-            self.refresh_tray_texts();
             cx.notify();
             return;
         };
         if let Err(error) = self.apply_tun_configuration(enabled, cx) {
             self.integration_error = Some(concise_error(&format!("{error:#}"), 160));
-            self.refresh_tray_texts();
             cx.notify();
             return;
         }
         self.integration_error = None;
-        self.refresh_tray_texts();
         cx.notify();
     }
 
