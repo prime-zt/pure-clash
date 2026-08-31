@@ -164,13 +164,13 @@ pc-mihomo.exe -d <managed-home> -f <active-config> \
 
 所有运行时路径由 `AppPaths` 集中解析，不能使用进程工作目录。当前 Windows 产品约定保持不变，后续平台采用可写的系统用户目录：
 
-| 平台 | 配置目录 | 数据目录 | 随包内核资源 |
+| 平台 | 配置目录 | 数据目录 | 随包只读资源 |
 | --- | --- | --- | --- |
-| Windows（当前支持） | `<program-dir>/config` | `<program-dir>/data` | `<program-dir>/kernel/<version>/pc-mihomo.exe` |
-| Linux（x64 已支持） | `$XDG_CONFIG_HOME/pure-clash` 或 `~/.config/pure-clash` | `$XDG_DATA_HOME/pure-clash` 或 `~/.local/share/pure-clash` | 按便携式/AppImage 的 `<program-dir>/kernel/<version>/pc-mihomo` 解析 |
-| macOS（预留） | `~/Library/Application Support/pure-clash` | `~/Library/Application Support/pure-clash` | `.app/Contents/Resources/kernel/<version>/pc-mihomo` |
+| Windows（当前支持） | `<program-dir>/config` | `<program-dir>/data` | `<program-dir>/kernel/<version>/pc-mihomo.exe`、`<program-dir>/geodata` |
+| Linux（x64 已支持） | `$XDG_CONFIG_HOME/pure-clash` 或 `~/.config/pure-clash` | `$XDG_DATA_HOME/pure-clash` 或 `~/.local/share/pure-clash` | `<program-dir>/kernel/<version>/pc-mihomo`、`<program-dir>/geodata` |
+| macOS（预留） | `~/Library/Application Support/pure-clash` | `~/Library/Application Support/pure-clash` | `.app/Contents/Resources/kernel/<version>/pc-mihomo`、`.app/Contents/Resources/geodata` |
 
-Linux/macOS 用户目录使用 `directories 6.0` 的 `ProjectDirs` 规则。Linux 正式的 deb/rpm/Flatpak 资源位置尚未确定，发行方案落地时必须扩展并验证内核资源查找，不应直接假设 `/usr/bin/kernel`。Windows 当前目录示例为：
+Linux/macOS 用户目录使用 `directories 6.0` 的 `ProjectDirs` 规则。Linux deb/rpm 将程序和资源安装到 `/opt/pure-clash` 并从 `/usr/bin/pure-clash` 软链启动，AppImage 把资源放到 AppDir 的可执行文件旁；Windows 当前目录示例为：
 
 ```text
 <program-dir>\
@@ -181,6 +181,13 @@ Linux/macOS 用户目录使用 `directories 6.0` 的 `ProjectDirs` 规则。Linu
       LICENSE              # Mihomo GPL-3.0 许可证
       NOTICE.md            # 上游归属、源码和非官方关系说明
       manifest.json        # 按编译目标记录下载地址、构建信息和 SHA-256
+  geodata\
+    GeoSite.dat            # 随包域名规则库
+    GeoIP.dat              # 随包二进制 GeoIP 规则库
+    Country.mmdb           # 随包 MMDB GeoIP 规则库
+    manifest.json          # 锁定同一官方提交、大小和 SHA-256
+    LICENSE                # 数据仓库 GPL-3.0 许可证
+    NOTICE.md              # 上游来源说明
   config\
     app.json               # AppConfig 主配置
     mihomo\
@@ -199,7 +206,13 @@ Linux 布局相同但二进制名为 `pc-mihomo`，内核文件随仓库提交�
 
 Windows 程序目录必须对当前用户可写；当前 per-user 安装位置满足该约束，不支持放入需要管理员权限才能写入的目录。Linux/macOS 不依赖应用资源目录可写，配置和运行数据进入用户目录。`app.json` 中每个字段都必须有默认值，缺失字段按默认值加载。订阅凭据、controller secret 和其他敏感字段在 Windows 进入 Credential Manager 或 DPAPI 保护的存储；其他平台需要使用对应系统凭据服务，`app.json` 只保存凭据引用。
 
-`config/mihomo/default.yaml` 作为编译期资源嵌入程序，只在运行目录缺少该文件时创建，不覆盖用户修改。默认配置仅监听 loopback 的 mixed port `7890`，策略组只包含 Mihomo 内置 `DIRECT` 出站；启动按钮固定把 `-f` 指向该文件，把 `-d` 指向 `data/mihomo/`。
+`config/mihomo/default.yaml` 作为编译期资源嵌入程序，只在运行目录缺少该文件时创建，不覆盖用户修改。默认配置仅监听 loopback 的 mixed port `7890`，策略组只包含 Mihomo 内置 `DIRECT` 出站；启动按钮固定把 `-f` 指向合并并校验后的 `config/mihomo/runtime.yaml`，把 `-d` 指向 `data/mihomo/`。
+
+配置页同时支持 URL 订阅和本地 YAML 导入。本地文件由 GPUI 原生文件选择器获取，Windows 使用系统对话框、Linux 通过 XDG portal、macOS 使用原生面板；应用只读取至多 10MB 的 UTF-8 内容并保存校验后的副本，不记录源路径。两种来源共用结构预检、本地基线合并、目标内核 `-t` 与原子保存链路，任一步失败均不改变现有 profile、runtime 或运行内核。本地配置引用的相对 provider/规则文件不会随导入复制，用户应选择可独立校验的配置或把资源放入 Mihomo 数据目录。
+
+`geodata/manifest.json` 锁定 MetaCubeX/meta-rules-dat `release` 分支同一 commit 下的 `GeoSite.dat`、`GeoIP.dat`、`Country.mmdb`，并记录大小、SHA-256 和许可证。应用启动时校验随包资源并把完整快照原子复制到 Mihomo 数据目录，以 `.pure-clash-geodata.json` 记录来源与完整性；已有完整官方在线更新时不因应用升级回退到较旧随包快照，文件缺失或损坏则离线恢复整套随包版本。订阅下载、结构预检和内核 `-t` 校验均不得隐式下载 Geo 数据，因此用户在受限网络下仍能完成配置切换。
+
+设置页的手动更新是唯一 Geo 在线更新入口：先读取官方 `release` 分支当前 commit，再从该固定 commit 下载三份文件，限制单文件大小并计算 SHA-256，三件套和状态标记全部提交成功后才视为更新完成；中途失败尽力回滚原文件。更新成功时重启正在运行的 Mihomo，未运行时留待下次启动加载。Windows NSIS 与 Linux deb/rpm/AppImage 均携带数据、manifest、LICENSE 和 NOTICE；卸载只删除随包资源，用户数据目录中的更新版本继续保留。
 
 `app.json` 的 `mihomo_version` 表示启动时选用的内核版本。其默认值和运行时文件名由 `build.rs` 从唯一的随包 `manifest.json` 按当前编译目标注入，运行时按 `AppPaths.kernel_dir/<mihomo_version>/<manifest binary>` 解析；版本配置值只能是单个目录名，manifest 的 `binary` 也只能是安全的单文件名。界面语言由 `language` 字段控制，支持 `zh-CN` 和 `en-US`，缺省为 `zh-CN`。翻译资源由 `rust-i18n 4.2.1` 在编译期从 `locales/` 嵌入可执行文件；切换语言时同步更新全局 locale 和配置文件，不依赖运行时外部语言包。
 
@@ -231,7 +244,7 @@ Windows 保存 `ProxyEnable` / `ProxyServer` 并经 WinINet 广播变更。Linux
 
 TUN 开关写入客户端本地基线，重新合并配置并用同版本 Mihomo 执行 `-t`，运行中的内核随后重启。Windows 通过 `runas` 触发 UAC，只提升 Mihomo 进程并使用随包 wintun。Linux 参考 Clash Verge Rev 的服务模型：首次启用通过 `pkexec` 重新执行内部安装器，验证 `PKEXEC_UID`、Pure Clash 父进程与随包内核后，把服务程序及锁定版本内核原子复制到 root 所有、普通用户不可写的 `/usr/libexec/pure-clash-service` 与 `/usr/lib/pure-clash/kernel/`，写入并启动 `pure-clash-service.service`；后续启停不再调用 `pkexec`。
 
-Linux 服务 socket 位于 `/run/pure-clash-service/service.sock`（`0660`，root 与授权用户私有组），服务通过 `SO_PEERCRED` 复核调用者 UID；IPC 为长度前缀 JSON，只接受 Ping/Start/Status/Stop 四个请求，不接受客户端传入内核路径，只能启动 `/usr/lib/pure-clash/kernel/` 下 root 所有的固定副本。Start 请求携带 runtime bundle：运行时 YAML、本地资源（provider 与 GeoSite/GeoIP 数据）和远程 provider 列表。服务把 bundle 原子物化到 `/var/lib/pure-clash-service/users/<uid>/runtime`——资源来源必须属于授权用户且组/其他位不可写，目标路径禁止穿越、符号链接和保留名；物化以 `.pure-clash-runtime.json` 清单管理增量，先以锁定内核在运行目录内 `-t` 校验，再以 root 启动 Mihomo。对齐 Clash Verge Rev 当前服务模型，服务与内核保持 root 运行，不降 UID、不设置 ambient capabilities、不替换系统网络工具。服务负责进程守护，GUI PID 消失时自动回收内核，协议版本不匹配时强制重新走一次安装授权。Windows 继续用 Job Object 管理提权句柄。两端在 controller 就绪后读取 `/configs` 核对 TUN 真实生效状态。拒绝授权、缺少服务/wintun/polkit或 TUN 未生效时，客户端自动关闭 TUN、重新生成配置并以普通权限恢复内核。
+Linux 服务 socket 位于 `/run/pure-clash-service/service.sock`（`0660`，root 与授权用户私有组），服务通过 `SO_PEERCRED` 复核调用者 UID；IPC 为长度前缀 JSON，只接受 Ping/Start/Status/Stop 四个请求，不接受客户端传入内核路径，只能启动 `/usr/lib/pure-clash/kernel/` 下 root 所有的固定副本。Start 请求携带 runtime bundle：运行时 YAML、本地资源（provider 与 GeoSite/GeoIP/Country 数据）和远程 provider 列表。服务把 bundle 原子物化到 `/var/lib/pure-clash-service/users/<uid>/runtime`——资源来源必须属于授权用户且组/其他位不可写，目标路径禁止穿越、符号链接和保留名；物化以 `.pure-clash-runtime.json` 清单管理增量，先以锁定内核在运行目录内 `-t` 校验，再以 root 启动 Mihomo。对齐 Clash Verge Rev 当前服务模型，服务与内核保持 root 运行，不降 UID、不设置 ambient capabilities、不替换系统网络工具。服务负责进程守护，GUI PID 消失时自动回收内核，协议版本不匹配时强制重新走一次安装授权。Windows 继续用 Job Object 管理提权句柄。两端在 controller 就绪后读取 `/configs` 核对 TUN 真实生效状态。拒绝授权、缺少服务/wintun/polkit或 TUN 未生效时，客户端自动关闭 TUN、重新生成配置并以普通权限恢复内核。
 
 服务以 root 运行意味着 sing-tun 的 `resolvectl` 调用和 TUN 设备管理天然具备权限，无需任何 shim 或 capabilities 补丁。实际 DNS 接管对齐 Clash Verge Rev 的工作配置，由 Mihomo 的双栈 fake-IP、`dns-hijack: any:53` 与 auto-route 完成；桌面进程不使用 `nmcli device modify` 二次修改刚创建的虚拟网卡，只经 controller 核对 TUN 状态，避免路由切换期间引入 DNS 竞态。
 
@@ -303,9 +316,9 @@ targets.<os-arch>：
 
 ### Phase 2：桌面 MVP（当前阶段）
 
-已完成：总览/代理/连接/配置/设置五页真实数据；URL 订阅下载、更新、删除与激活；节点选择与模式切换；连接列表与实时流量（1 秒轮询差分）；连接关闭；单节点与整组延迟测试；Windows/Linux 系统代理托管与自愈；托盘、单实例与国际化。
+已完成：总览/代理/连接/配置/设置五页真实数据；URL 订阅下载与本地 YAML 导入、更新、删除和激活；节点选择与模式切换；连接列表与实时流量（1 秒轮询差分）；连接关闭；单节点与整组延迟测试；Windows/Linux 系统代理托管与自愈；托盘、单实例与国际化。
 
-待实现：规则页、日志/内存监控、本地 YAML 导入、订阅历史回滚、内核下载与版本回滚。
+待实现：规则页、日志/内存监控、订阅历史回滚、内核下载与版本回滚。
 
 ### Phase 3：Beta
 

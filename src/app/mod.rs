@@ -1,6 +1,6 @@
 use gpui::{
-    AnyElement, App, ClickEvent, Context, Entity, IntoElement, Render, SharedString, Styled,
-    Window, div, prelude::*, px, rgb,
+    AnyElement, App, ClickEvent, Context, Entity, IntoElement, PathPromptOptions, Render,
+    SharedString, Styled, Window, div, prelude::*, px, rgb,
 };
 use rust_i18n::t;
 
@@ -24,6 +24,7 @@ use crate::{
         controller::{
             ConnectionItem, ConnectionsSnapshot, Controller, GroupSnapshot, Mode, NodeSnapshot,
         },
+        geodata::{GeodataInfo, UpdateOutcome},
     },
     platform::{
         AppPaths, SystemProxySnapshot, SystemTray, capture_system_proxy, restore_system_proxy,
@@ -219,6 +220,12 @@ pub(crate) struct PureClash {
     profile_error: Option<String>,
     /// 系统代理 / TUN 的操作失败提示，展示在设置页与概览页。
     integration_error: Option<String>,
+    /// 当前已安装 Geo 数据的官方提交与更新时间。
+    geodata_info: GeodataInfo,
+    /// 设置页手动更新 Geo 数据的后台忙态。
+    geodata_updating: bool,
+    /// 最近一次 Geo 数据更新结果，仅在设置页展示。
+    geodata_status: Option<SharedString>,
     /// 代理页数据拉取中。
     proxies_loading: bool,
     /// 分组手动折叠状态（组名 → 是否展开）；未记录的组按节点数自动决定。
@@ -241,7 +248,11 @@ pub(crate) struct PureClash {
 
 impl PureClash {
     pub(crate) fn new(loaded_config: LoadedConfig, cx: &mut Context<Self>) -> Self {
-        let LoadedConfig { mut config, paths } = loaded_config;
+        let LoadedConfig {
+            mut config,
+            paths,
+            geodata_info,
+        } = loaded_config;
         // 启动时以 AppConfig 指定的版本确定当前内核路径和可用状态。
         let kernel_available = is_available(&paths, &config.mihomo_version);
 
@@ -321,6 +332,9 @@ impl PureClash {
             profile_busy: None,
             profile_error: runtime_error,
             integration_error: None,
+            geodata_info,
+            geodata_updating: false,
+            geodata_status: None,
             proxies_loading: false,
             group_expanded: std::collections::HashMap::new(),
             group_page: std::collections::HashMap::new(),
@@ -451,6 +465,61 @@ impl PureClash {
         .detach();
     }
 
+    /// 设置页显式更新三份 Geo 数据；下载与哈希计算全部放到后台线程。
+    ///
+    /// 更新模块先固定官方 release 分支提交，再完整下载并原子提交同一快照。
+    /// 运行中的 Mihomo 会在成功切换后重启，确保新规则库立即生效。
+    fn update_geodata(&mut self, cx: &mut Context<Self>) {
+        if self.geodata_updating {
+            return;
+        }
+        self.geodata_updating = true;
+        self.geodata_status = None;
+        let paths = self.paths.clone();
+        cx.notify();
+
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { crate::mihomo::geodata::update_from_official(&paths) })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.geodata_updating = false;
+                match result {
+                    Ok(UpdateOutcome::UpToDate(info)) => {
+                        this.geodata_info = info;
+                        this.geodata_status = Some(tr("settings.geodata_up_to_date"));
+                    }
+                    Ok(UpdateOutcome::Updated(info)) => {
+                        let revision = short_revision(&info.revision);
+                        let restart_required = this.mihomo_process.is_some();
+                        this.geodata_info = info;
+                        this.geodata_status = Some(SharedString::from(if restart_required {
+                            t!("settings.geodata_updated_reloaded", revision = revision)
+                                .into_owned()
+                        } else {
+                            t!("settings.geodata_updated", revision = revision).into_owned()
+                        }));
+                        if restart_required {
+                            this.restart_core(cx);
+                        }
+                    }
+                    Err(error) => {
+                        this.geodata_status = Some(SharedString::from(
+                            t!(
+                                "settings.geodata_update_failed",
+                                error = concise_error(&format!("{error:#}"), 180)
+                            )
+                            .into_owned(),
+                        ));
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     /// 标题栏和设置页共用同一主题状态，确保两个入口始终同步。
     fn toggle_theme(&mut self, cx: &mut Context<Self>) {
         let previous = self.config.theme;
@@ -488,6 +557,8 @@ impl PureClash {
         }
 
         self.refresh_tray_texts();
+        // 更新结果文案绑定生成时的 locale，切换语言后清空以避免混合显示。
+        self.geodata_status = None;
         // 输入框占位文案在实体创建时固定，语言切换后按新 locale 重建。
         self.profile_form_name = cx.new(|cx| TextInput::new(t!("profiles.name_placeholder"), cx));
         self.profile_form_url = cx.new(|cx| TextInput::new(t!("profiles.url_placeholder"), cx));
@@ -1207,6 +1278,9 @@ impl PureClash {
 
     /// 打开或关闭添加配置的内联表单。
     fn toggle_profile_form(&mut self, cx: &mut Context<Self>) {
+        if self.profile_busy.is_some() {
+            return;
+        }
         self.profile_form_open = !self.profile_form_open;
         if !self.profile_form_open {
             self.profile_error = None;
@@ -1268,6 +1342,120 @@ impl PureClash {
                 Err(error) => {
                     this.profile_busy = None;
                     this.profile_error = Some(concise_error(&format!("{error:#}"), 200));
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// 选择并导入本地 Mihomo YAML；只保存校验后的内容副本，不持久化源文件路径。
+    fn import_local_profile(&mut self, cx: &mut Context<Self>) {
+        if self.profile_busy.is_some() {
+            return;
+        }
+        let preferred_name = self.profile_form_name.read(cx).content().trim().to_owned();
+        let receiver = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some(tr("profiles.file_picker_import")),
+        });
+        self.profile_busy = Some(t!("profiles.busy_selecting").into_owned());
+        self.profile_error = None;
+        cx.notify();
+
+        let version = self.config.mihomo_version.clone();
+        let paths = self.paths.clone();
+        cx.spawn(async move |this, cx| {
+            let selected = match receiver.await {
+                Ok(Ok(Some(paths))) => paths.into_iter().next(),
+                Ok(Ok(None)) => {
+                    // 用户取消属于正常流程，仅恢复表单可操作状态。
+                    let _ = this.update(cx, |this, cx| {
+                        this.profile_busy = None;
+                        cx.notify();
+                    });
+                    return;
+                }
+                Ok(Err(error)) => {
+                    let _ = this.update(cx, |this, cx| {
+                        this.profile_busy = None;
+                        this.profile_error = Some(
+                            t!(
+                                "profiles.import_failed",
+                                error = concise_error(&format!("{error:#}"), 180)
+                            )
+                            .into_owned(),
+                        );
+                        cx.notify();
+                    });
+                    return;
+                }
+                Err(error) => {
+                    let _ = this.update(cx, |this, cx| {
+                        this.profile_busy = None;
+                        this.profile_error = Some(
+                            t!(
+                                "profiles.import_failed",
+                                error = concise_error(&error.to_string(), 180)
+                            )
+                            .into_owned(),
+                        );
+                        cx.notify();
+                    });
+                    return;
+                }
+            };
+            let Some(path) = selected else {
+                let _ = this.update(cx, |this, cx| {
+                    this.profile_busy = None;
+                    cx.notify();
+                });
+                return;
+            };
+            let name = if preferred_name.is_empty() {
+                profile::default_name_from_path(&path)
+                    .unwrap_or_else(|| t!("profiles.default_local_name").into_owned())
+            } else {
+                preferred_name
+            };
+
+            let _ = this.update(cx, |this, cx| {
+                this.profile_busy = Some(t!("profiles.busy_importing").into_owned());
+                cx.notify();
+            });
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    let content = profile::read_local_config(&path)?;
+                    let id = profile::new_profile_id();
+                    let runtime = profile::validate_and_store(&paths, &version, &id, &content)?;
+                    Ok::<_, anyhow::Error>((id, runtime))
+                })
+                .await;
+
+            let _ = this.update(cx, |this, cx| match result {
+                Ok((id, runtime)) => {
+                    this.profile_busy = None;
+                    this.profile_form_open = false;
+                    let mut meta = profile::local_meta(name);
+                    // 文件已按后台任务生成的 id 落盘，元数据必须使用同一 id。
+                    meta.id = id;
+                    let index = this.profiles.len();
+                    this.profiles.push(meta);
+                    this.save_profiles();
+                    this.activate_profile_by_id(index, runtime, cx);
+                }
+                Err(error) => {
+                    this.profile_busy = None;
+                    this.profile_error = Some(
+                        t!(
+                            "profiles.import_failed",
+                            error = concise_error(&format!("{error:#}"), 180)
+                        )
+                        .into_owned(),
+                    );
                     cx.notify();
                 }
             });
@@ -1734,6 +1922,11 @@ fn tr(key: &'static str) -> SharedString {
     SharedString::from(t!(key).into_owned())
 }
 
+/// 设置页只展示提交前八位，完整 SHA 仍保存在 Geo 数据状态文件中。
+fn short_revision(revision: &str) -> String {
+    revision.chars().take(8).collect()
+}
+
 fn concise_error(error: &str, max_chars: usize) -> String {
     let mut concise: String = error.chars().take(max_chars).collect();
     if error.chars().count() > max_chars {
@@ -1800,6 +1993,39 @@ mod tests {
         assert_eq!(
             t!("about.check_failed", locale = "en-US", error = "timed out"),
             "Update check failed: timed out"
+        );
+        assert_eq!(
+            t!(
+                "settings.geodata_version",
+                locale = "zh-CN",
+                revision = "d2a52e8a",
+                updated = "2026-08-31"
+            ),
+            "版本 d2a52e8a · 更新于 2026-08-31"
+        );
+        assert_eq!(
+            t!(
+                "settings.geodata_update_failed",
+                locale = "en-US",
+                error = "timed out"
+            ),
+            "Geo data update failed: timed out"
+        );
+        assert_eq!(
+            t!(
+                "profiles.import_failed",
+                locale = "zh-CN",
+                error = "配置格式错误"
+            ),
+            "导入本地配置失败：配置格式错误"
+        );
+        assert_eq!(
+            t!(
+                "profiles.import_failed",
+                locale = "en-US",
+                error = "invalid config"
+            ),
+            "Local profile import failed: invalid config"
         );
         assert_eq!(
             t!(

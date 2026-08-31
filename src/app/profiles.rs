@@ -4,7 +4,7 @@ use gpui::{AnyElement, Context, SharedString, Styled, div, px};
 use rust_i18n::t;
 
 use super::*;
-use crate::assets::{ICON_CIRCLE_CHECK, ICON_FILE_CODE, ICON_SHIELD_CHECK};
+use crate::assets::{ICON_CIRCLE_CHECK, ICON_FILE_CODE, ICON_FOLDER, ICON_SEND, ICON_SHIELD_CHECK};
 use crate::config::ProfileMeta;
 use crate::theme::{FontWeightExt, Palette};
 
@@ -123,7 +123,7 @@ pub(super) fn render_profiles(
         .into_any_element()
 }
 
-/// 添加订阅的内联表单：名称可选（默认取主机名），URL 必填。
+/// 添加配置的内联表单：名称可选，可下载 URL 订阅或选择本地 YAML。
 fn render_profile_form(
     app: &PureClash,
     palette: Palette,
@@ -195,8 +195,35 @@ fn render_profile_form(
                         .text_xs()
                         .font_medium()
                         .text_color(palette.surface)
+                        .gap_1()
+                        .child(icon(ICON_SEND, palette.surface, 14.0))
                         .child(tr("profiles.form_submit"))
                         .on_click(cx.listener(|this, _, _, cx| this.add_subscription(cx))),
+                )
+                .child(
+                    div()
+                        .id("profile-form-import-local")
+                        .flex_1()
+                        .h(px(32.0))
+                        .rounded_sm()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .gap_1()
+                        .map(|button| {
+                            if busy {
+                                button.opacity(0.5)
+                            } else {
+                                button.cursor_pointer()
+                            }
+                        })
+                        .bg(palette.accent_soft)
+                        .text_xs()
+                        .font_medium()
+                        .text_color(palette.accent)
+                        .child(icon(ICON_FOLDER, palette.accent, 14.0))
+                        .child(tr("profiles.import_local"))
+                        .on_click(cx.listener(|this, _, _, cx| this.import_local_profile(cx))),
                 )
                 .child(
                     div()
@@ -207,7 +234,13 @@ fn render_profile_form(
                         .flex()
                         .items_center()
                         .justify_center()
-                        .cursor_pointer()
+                        .map(|button| {
+                            if busy {
+                                button.opacity(0.5)
+                            } else {
+                                button.cursor_pointer()
+                            }
+                        })
                         .bg(palette.surface_alt)
                         .text_xs()
                         .text_color(palette.muted)
@@ -218,8 +251,8 @@ fn render_profile_form(
         .into_any_element()
 }
 
-/// 格式化更新时间为本地可读日期；时间戳为 0 时显示“未更新”。
-fn format_profile_time(timestamp: u64) -> SharedString {
+/// 格式化更新时间为 UTC 日期；时间戳为 0 时显示“未更新”。
+pub(super) fn format_profile_time(timestamp: u64) -> SharedString {
     if timestamp == 0 {
         return tr("profiles.never_updated");
     }

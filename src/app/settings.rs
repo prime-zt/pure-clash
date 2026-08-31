@@ -4,7 +4,7 @@ use gpui::{AnyElement, Context, SharedString, Styled, div, px};
 
 use super::overview::integration_error_banner;
 use super::*;
-use crate::assets::{ICON_FOLDER, ICON_SETTINGS};
+use crate::assets::{ICON_FOLDER, ICON_REFRESH_CW, ICON_SETTINGS, ICON_SHIELD_CHECK};
 use crate::config::Language;
 use crate::theme::{FontWeightExt, Palette};
 
@@ -71,6 +71,22 @@ pub(super) fn render_settings(
                 .border_1()
                 .border_color(palette.border)
                 .child(section_heading(
+                    tr("settings.geodata"),
+                    tr("settings.geodata_detail"),
+                    ICON_SHIELD_CHECK,
+                    palette,
+                ))
+                .child(geodata_update_row(app, palette, cx)),
+        )
+        .child(
+            div()
+                .mt_4()
+                .p_4()
+                .rounded_md()
+                .bg(palette.surface)
+                .border_1()
+                .border_color(palette.border)
+                .child(section_heading(
                     tr("settings.runtime_dir"),
                     tr("settings.runtime_dir_detail"),
                     ICON_FOLDER,
@@ -106,6 +122,82 @@ pub(super) fn render_settings(
                     ),
                     palette,
                 )),
+        )
+        .into_any_element()
+}
+
+/// Geo 数据是随包资源的用户态副本；更新按钮只替换数据目录，不修改安装目录。
+fn geodata_update_row(
+    app: &PureClash,
+    palette: Palette,
+    cx: &mut Context<PureClash>,
+) -> AnyElement {
+    let revision = short_revision(&app.geodata_info.revision);
+    let updated = super::profiles::format_profile_time(app.geodata_info.updated_at);
+    div()
+        .mt_2()
+        .min_h(px(64.0))
+        .flex()
+        .items_center()
+        .gap_3()
+        .border_b_1()
+        .border_color(palette.border)
+        .child(
+            div()
+                .min_w_0()
+                .flex_1()
+                .child(
+                    div()
+                        .text_sm()
+                        .font_medium()
+                        .text_color(palette.text)
+                        .child(tr("settings.geodata_files")),
+                )
+                .child(
+                    div().mt_1().text_xs().text_color(palette.muted).child(
+                        t!(
+                            "settings.geodata_version",
+                            revision = revision,
+                            updated = updated.to_string()
+                        )
+                        .into_owned(),
+                    ),
+                )
+                .children(app.geodata_status.as_ref().map(|status| {
+                    div()
+                        .mt_1()
+                        .text_xs()
+                        .text_color(palette.muted)
+                        .child(status.clone())
+                })),
+        )
+        .child(
+            div()
+                .id("update-geodata")
+                .h(px(30.0))
+                .px_3()
+                .rounded_sm()
+                .flex()
+                .items_center()
+                .gap_2()
+                .map(|button| {
+                    if app.geodata_updating {
+                        button.opacity(0.6)
+                    } else {
+                        button.cursor_pointer()
+                    }
+                })
+                .bg(palette.accent)
+                .text_xs()
+                .font_medium()
+                .text_color(palette.surface)
+                .child(icon(ICON_REFRESH_CW, palette.surface, 13.0))
+                .child(if app.geodata_updating {
+                    tr("settings.geodata_updating")
+                } else {
+                    tr("settings.geodata_update")
+                })
+                .on_click(cx.listener(|this, _, _, cx| this.update_geodata(cx))),
         )
         .into_any_element()
 }

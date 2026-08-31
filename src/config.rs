@@ -45,10 +45,10 @@ impl Language {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum Theme {
-    /// 深色主题，也是首次启动时的默认值。
-    #[default]
+    /// 深色主题。
     Dark,
-    /// 浅色主题。
+    /// 浅色主题，也是首次启动时的默认值。
+    #[default]
     Light,
 }
 
@@ -130,6 +130,8 @@ pub(crate) struct LoadedConfig {
     pub(crate) config: AppConfig,
     /// 当前平台的程序、配置、数据和内核目录集合。
     pub(crate) paths: AppPaths,
+    /// 启动时完成离线安装并校验后的 Geo 数据版本信息。
+    pub(crate) geodata_info: crate::mihomo::geodata::GeodataInfo,
 }
 
 /// 按当前平台目录策略初始化配置、数据目录和主配置文件。
@@ -163,6 +165,11 @@ fn load_or_create_with_paths(paths: AppPaths) -> Result<LoadedConfig> {
     })?;
     fs::create_dir_all(&paths.profiles_dir)
         .with_context(|| format!("无法创建配置订阅目录：{}", paths.profiles_dir.display()))?;
+
+    // Geo 规则库随安装包分发，首次启动只从本地只读资源复制到 Mihomo 数据目录。
+    // 初始化失败时直接中止，避免后续订阅校验退化为依赖用户网络的隐式下载。
+    let geodata_info =
+        crate::mihomo::geodata::ensure_bundled(&paths).context("无法初始化随包 Geo 数据")?;
 
     if !paths.default_mihomo_config_file.exists() {
         // 默认文件只在缺失时生成，后续启动不得覆盖用户已经编辑的 YAML。
@@ -210,7 +217,11 @@ fn load_or_create_with_paths(paths: AppPaths) -> Result<LoadedConfig> {
         config.save(config_path)?;
     }
 
-    Ok(LoadedConfig { config, paths })
+    Ok(LoadedConfig {
+        config,
+        paths,
+        geodata_info,
+    })
 }
 
 #[cfg(test)]
@@ -236,7 +247,7 @@ mod tests {
         let root = test_dir("create");
         let loaded = load_or_create_in(&root).expect("应完成首次配置初始化");
 
-        assert_eq!(loaded.config.theme, Theme::Dark);
+        assert_eq!(loaded.config.theme, Theme::Light);
         assert_eq!(loaded.config.language, Language::Chinese);
         assert_eq!(
             loaded.config.mihomo_version,
@@ -284,7 +295,7 @@ mod tests {
 
         fs::write(root.join("config/app.json"), "{}\n").expect("应写入缺省字段配置");
         let defaulted = load_or_create_in(&root).expect("缺少字段时应使用默认值");
-        assert_eq!(defaulted.config.theme, Theme::Dark);
+        assert_eq!(defaulted.config.theme, Theme::Light);
         assert_eq!(
             defaulted.config.mihomo_version,
             env!("PURE_CLASH_DEFAULT_MIHOMO_VERSION")

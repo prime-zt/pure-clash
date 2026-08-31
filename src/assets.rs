@@ -27,6 +27,7 @@ pub(crate) const ICON_CIRCLE_CHECK: &str = "icons/circle-check.svg";
 pub(crate) const ICON_PAPERCLIP: &str = "icons/paperclip.svg";
 pub(crate) const ICON_SEND: &str = "icons/send.svg";
 pub(crate) const ICON_STOP: &str = "icons/square.svg";
+pub(crate) const ICON_REFRESH_CW: &str = "icons/refresh-cw.svg";
 pub(crate) const ICON_SUN: &str = "icons/sun.svg";
 pub(crate) const ICON_MOON: &str = "icons/moon.svg";
 pub(crate) const ICON_WINDOW_MINIMIZE: &str = "icons/window-minimize.svg";
@@ -69,6 +70,7 @@ impl AssetSource for Assets {
             ICON_PAPERCLIP => include_bytes!("../assets/icons/paperclip.svg"),
             ICON_SEND => include_bytes!("../assets/icons/send.svg"),
             ICON_STOP => include_bytes!("../assets/icons/square.svg"),
+            ICON_REFRESH_CW => include_bytes!("../assets/icons/refresh-cw.svg"),
             ICON_SUN => include_bytes!("../assets/icons/sun.svg"),
             ICON_MOON => include_bytes!("../assets/icons/moon.svg"),
             ICON_WINDOW_MINIMIZE => include_bytes!("../assets/icons/window-minimize.svg"),
@@ -105,6 +107,7 @@ impl AssetSource for Assets {
             ICON_PAPERCLIP.into(),
             ICON_SEND.into(),
             ICON_STOP.into(),
+            ICON_REFRESH_CW.into(),
             ICON_SUN.into(),
             ICON_MOON.into(),
             ICON_WINDOW_MINIMIZE.into(),

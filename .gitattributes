@@ -2,6 +2,11 @@
 # 禁止任何行尾转换，否则 Windows 检出后哈希与 manifest 不一致。
 kernel/** -text
 
+# Geo 数据按 manifest 做字节级校验，二进制文件禁止任何文本转换。
+geodata/*.dat binary
+geodata/*.mmdb binary
+geodata/LICENSE -text
+
 # 二进制资源不参与文本处理。
 *.png binary
 *.ico binary

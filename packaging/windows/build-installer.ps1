@@ -143,10 +143,59 @@ try {
         throw "未找到项目 LICENSE 文件：$projectLicense"
     }
 
+    # Geo 数据使用独立 manifest 锁定同一官方提交；打包前再做一次文件集合与哈希复核。
+    $geodataRoot = Join-Path $projectRoot "geodata"
+    $geodataManifest = Join-Path $geodataRoot "manifest.json"
+    $geodataLicense = Join-Path $geodataRoot "LICENSE"
+    $geodataNotice = Join-Path $geodataRoot "NOTICE.md"
+    foreach ($requiredGeoFile in @($geodataManifest, $geodataLicense, $geodataNotice)) {
+        if (-not (Test-Path -LiteralPath $requiredGeoFile -PathType Leaf)) {
+            throw "内置 Geo 数据资源不存在：$requiredGeoFile"
+        }
+    }
+    $geodataMetadata = Get-Content -Raw -LiteralPath $geodataManifest | ConvertFrom-Json
+    if ($geodataMetadata.schema_version -ne 1 -or
+        $geodataMetadata.source_repository -ne "https://github.com/MetaCubeX/meta-rules-dat" -or
+        $geodataMetadata.source_branch -ne "release" -or
+        [string]$geodataMetadata.source_commit -notmatch '^[0-9a-fA-F]{40}$') {
+        throw "Geo 数据 manifest 元数据无效：$geodataManifest"
+    }
+    $expectedGeoNames = @("Country.mmdb", "GeoIP.dat", "GeoSite.dat")
+    $actualGeoNames = @($geodataMetadata.files | ForEach-Object { [string]$_.name })
+    if ($actualGeoNames.Count -ne $expectedGeoNames.Count -or
+        @($actualGeoNames | Sort-Object -Unique).Count -ne $expectedGeoNames.Count -or
+        @(Compare-Object ($expectedGeoNames | Sort-Object) ($actualGeoNames | Sort-Object)).Count -ne 0) {
+        throw "Geo 数据 manifest 必须且只能包含三份基础数据。"
+    }
+    $geodataPayloads = @()
+    foreach ($geoEntry in $geodataMetadata.files) {
+        $geoName = [string]$geoEntry.name
+        if ([IO.Path]::GetFileName($geoName) -ne $geoName -or $geoName -notmatch '^[A-Za-z0-9._-]+$') {
+            throw "Geo 数据 manifest 包含不安全的文件名：$geoName"
+        }
+        $geoSource = Join-Path $geodataRoot $geoName
+        if (-not (Test-Path -LiteralPath $geoSource -PathType Leaf)) {
+            throw "内置 Geo 数据不存在：$geoSource"
+        }
+        if ((Get-Item -LiteralPath $geoSource).Length -ne [long]$geoEntry.size) {
+            throw "内置 Geo 数据大小与 manifest 不一致：$geoName"
+        }
+        $geoHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $geoSource).Hash.ToLowerInvariant()
+        if ($geoHash -ne [string]$geoEntry.sha256) {
+            throw "内置 Geo 数据 SHA-256 与 manifest 不一致：$geoName"
+        }
+        $geodataPayloads += $geoSource
+    }
+    $geodataLicenseHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $geodataLicense).Hash.ToLowerInvariant()
+    if ($geodataLicenseHash -ne [string]$geodataMetadata.license_sha256) {
+        throw "Geo 数据 LICENSE SHA-256 与 manifest 不一致。"
+    }
+    $geodataFiles = @($geodataManifest, $geodataLicense, $geodataNotice) + $geodataPayloads
+
     $distDir = Join-Path $projectRoot "dist"
     New-Item -ItemType Directory -Force -Path $distDir | Out-Null
     $installerOutput = Join-Path $distDir "pure-clash-$version-windows-x64-setup.exe"
-    $packagedFiles = @($appExe, $kernelExe, $kernelLicense, $kernelNotice, $kernelManifest, $projectLicense)
+    $packagedFiles = @($appExe, $kernelExe, $kernelLicense, $kernelNotice, $kernelManifest, $projectLicense) + $geodataFiles
     if ($wintunSource) {
         $packagedFiles += $wintunSource
     }
@@ -190,6 +239,7 @@ try {
         "/DKERNEL_LICENSE_SOURCE=$kernelLicense"
         "/DKERNEL_NOTICE_SOURCE=$kernelNotice"
         "/DKERNEL_MANIFEST_SOURCE=$kernelManifest"
+        "/DGEODATA_ROOT=$geodataRoot"
         "/DPROJECT_LICENSE_SOURCE=$projectLicense"
         "/DINSTALLER_OUTPUT=$installerOutput"
         "/DINSTALL_SIZE_KB=$installSizeKb"

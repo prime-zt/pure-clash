@@ -9,7 +9,7 @@
 
 use std::{
     fs,
-    path::PathBuf,
+    path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -20,7 +20,7 @@ use crate::{
     config::ProfileMeta,
     mihomo::{
         config::{ensure_baseline, merge_runtime, validate_kernel_config, write_runtime},
-        controller::Controller,
+        controller::{Controller, MAX_DOWNLOAD_BYTES},
     },
     platform::AppPaths,
 };
@@ -74,6 +74,29 @@ pub(crate) fn validate_and_store(
 /// 下载订阅内容；失败信息已脱敏为站点主机，不含完整 URL。
 pub(crate) fn download_subscription(url: &str) -> Result<String> {
     Controller::download_subscription(url)
+}
+
+/// 读取用户选择的本地 Mihomo YAML；沿用订阅 10MB 上限并要求 UTF-8 文本。
+pub(crate) fn read_local_config(path: &Path) -> Result<String> {
+    let metadata =
+        fs::metadata(path).with_context(|| format!("无法读取本地配置：{}", path.display()))?;
+    if !metadata.is_file() {
+        bail!("选择的路径不是文件");
+    }
+    if metadata.len() > MAX_DOWNLOAD_BYTES {
+        bail!("本地配置超过 10MB 体积上限");
+    }
+    let bytes = fs::read(path).with_context(|| format!("无法读取本地配置：{}", path.display()))?;
+    if bytes.len() as u64 > MAX_DOWNLOAD_BYTES {
+        bail!("本地配置超过 10MB 体积上限");
+    }
+    String::from_utf8(bytes).map_err(|_| anyhow::anyhow!("本地配置不是有效的 UTF-8 文本"))
+}
+
+/// 从本地文件名派生默认显示名；路径本身不会写入配置元数据。
+pub(crate) fn default_name_from_path(path: &Path) -> Option<String> {
+    let name = path.file_stem()?.to_string_lossy().trim().to_owned();
+    (!name.is_empty() && !name.starts_with('.')).then_some(name)
 }
 
 /// 从订阅 URL 派生默认显示名：取主机名部分。
@@ -155,6 +178,18 @@ pub(crate) fn subscription_meta(name: String, url: String) -> ProfileMeta {
     }
 }
 
+/// 创建本地导入类型配置的元数据；`url` 为空表示不提供远程更新操作。
+pub(crate) fn local_meta(name: String) -> ProfileMeta {
+    let now = now_secs();
+    ProfileMeta {
+        id: new_profile_id(),
+        name,
+        url: None,
+        added_at: now,
+        updated_at: now,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -176,6 +211,47 @@ mod tests {
         );
         assert_eq!(default_name_from_url("not-a-url"), None);
         assert_eq!(default_name_from_url("https:///path"), None);
+    }
+
+    #[test]
+    fn local_profile_uses_filename_and_has_no_subscription_url() {
+        assert_eq!(
+            default_name_from_path(Path::new("C:/configs/home.yaml")),
+            Some("home".to_owned())
+        );
+        assert_eq!(default_name_from_path(Path::new(".yaml")), None);
+        let meta = local_meta("本地配置".to_owned());
+        assert_eq!(meta.name, "本地配置");
+        assert!(meta.url.is_none());
+    }
+
+    #[test]
+    fn local_config_reader_rejects_non_utf8_and_oversized_files() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("系统时间应晚于 UNIX_EPOCH")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "pure-clash-local-profile-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&root).expect("应创建本地配置测试目录");
+
+        let valid = root.join("valid.yaml");
+        fs::write(&valid, "rules:\n- MATCH,DIRECT\n").expect("应写入 UTF-8 配置");
+        assert!(read_local_config(&valid).is_ok());
+
+        let invalid = root.join("invalid.yaml");
+        fs::write(&invalid, [0xff, 0xfe]).expect("应写入无效 UTF-8 配置");
+        assert!(read_local_config(&invalid).is_err());
+
+        let oversized = root.join("oversized.yaml");
+        fs::File::create(&oversized)
+            .and_then(|file| file.set_len(MAX_DOWNLOAD_BYTES + 1))
+            .expect("应创建超限稀疏文件");
+        assert!(read_local_config(&oversized).is_err());
+
+        fs::remove_dir_all(root).expect("应清理本地配置测试目录");
     }
 
     #[test]

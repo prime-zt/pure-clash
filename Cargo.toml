@@ -25,6 +25,12 @@ assets = [
     ["kernel/1.19.30/LICENSE", "opt/pure-clash/kernel/1.19.30/", "644"],
     ["kernel/1.19.30/NOTICE.md", "opt/pure-clash/kernel/1.19.30/", "644"],
     ["kernel/1.19.30/manifest.json", "opt/pure-clash/kernel/1.19.30/", "644"],
+    ["geodata/GeoSite.dat", "opt/pure-clash/geodata/", "644"],
+    ["geodata/GeoIP.dat", "opt/pure-clash/geodata/", "644"],
+    ["geodata/Country.mmdb", "opt/pure-clash/geodata/", "644"],
+    ["geodata/manifest.json", "opt/pure-clash/geodata/", "644"],
+    ["geodata/LICENSE", "opt/pure-clash/geodata/", "644"],
+    ["geodata/NOTICE.md", "opt/pure-clash/geodata/", "644"],
     ["packaging/linux/pure-clash.desktop", "usr/share/applications/", "644"],
     ["packaging/linux/pure-clash.png", "usr/share/icons/hicolor/64x64/apps/", "644"],
 ]
@@ -42,6 +48,12 @@ assets = [
     { source = "kernel/1.19.30/LICENSE", dest = "/opt/pure-clash/kernel/1.19.30/LICENSE", mode = "644" },
     { source = "kernel/1.19.30/NOTICE.md", dest = "/opt/pure-clash/kernel/1.19.30/NOTICE.md", mode = "644" },
     { source = "kernel/1.19.30/manifest.json", dest = "/opt/pure-clash/kernel/1.19.30/manifest.json", mode = "644" },
+    { source = "geodata/GeoSite.dat", dest = "/opt/pure-clash/geodata/GeoSite.dat", mode = "644" },
+    { source = "geodata/GeoIP.dat", dest = "/opt/pure-clash/geodata/GeoIP.dat", mode = "644" },
+    { source = "geodata/Country.mmdb", dest = "/opt/pure-clash/geodata/Country.mmdb", mode = "644" },
+    { source = "geodata/manifest.json", dest = "/opt/pure-clash/geodata/manifest.json", mode = "644" },
+    { source = "geodata/LICENSE", dest = "/opt/pure-clash/geodata/LICENSE", mode = "644" },
+    { source = "geodata/NOTICE.md", dest = "/opt/pure-clash/geodata/NOTICE.md", mode = "644" },
     { source = "packaging/linux/pure-clash.desktop", dest = "/usr/share/applications/pure-clash.desktop", mode = "644" },
     { source = "packaging/linux/pure-clash.png", dest = "/usr/share/icons/hicolor/64x64/apps/pure-clash.png", mode = "644" },
 ]
@@ -56,6 +68,8 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 # 解析与合并 Clash YAML 配置；锁定 0.9 稳定版本。
 serde_yaml = "0.9"
+# 校验随包与在线更新的 Geo 数据，防止损坏文件进入运行目录。
+sha2 = "0.10"
 # 订阅下载与 controller REST 调用；rustls TLS，阻塞式跑在 GPUI 后台线程。
 ureq = { version = "2.10", features = ["json"] }
 # 生成配置文件随机 secret 与订阅 profile 标识。
@@ -98,6 +112,8 @@ directories = "6.0"
 
 [build-dependencies]
 serde_json = "1.0"
+# 构建期按 geodata manifest 复核随包文件。
+sha2 = "0.10"
 # Windows 构建将多分辨率 ICO 编入可执行文件，供 GPUI 窗口和系统快捷方式读取。
 winresource = { version = "0.1.31", default-features = false }
 

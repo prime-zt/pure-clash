@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "source_repository": "https://github.com/MetaCubeX/meta-rules-dat",
+  "source_branch": "release",
+  "source_commit": "d2a52e8ab09378b8818c8ad6e39198e5788ccfbb",
+  "license": "GPL-3.0",
+  "license_url": "https://github.com/MetaCubeX/meta-rules-dat/blob/4178770badecb1b349fbcd62c737e0d7a2079729/LICENSE",
+  "license_sha256": "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986",
+  "files": [
+    {
+      "name": "GeoSite.dat",
+      "upstream_path": "geosite.dat",
+      "size": 4246547,
+      "sha256": "13b7cde1c317da9b65a145c1678587ab0dff88c3bd9738e5d1faa0af5ee17c12"
+    },
+    {
+      "name": "GeoIP.dat",
+      "upstream_path": "geoip.dat",
+      "size": 17224069,
+      "sha256": "0d5d2ba0c5a5c58027fd1347a6afd57c9470799b6bb3cbc274fd4657ed8de382"
+    },
+    {
+      "name": "Country.mmdb",
+      "upstream_path": "country.mmdb",
+      "size": 7866385,
+      "sha256": "fe721d5e47d320b2a23db4eafddb796a22026ef01899bbe7007fc0274016e5f4"
+    }
+  ]
+}

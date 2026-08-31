@@ -18,7 +18,8 @@ Currently available for Windows x64 and Linux x64 (Wayland / X11); macOS keeps d
 ## Features
 
 - **Kernel lifecycle** — configuration is validated with the same kernel build via `-t` before launch; child processes are guarded by a Job Object (Windows) or `PR_SET_PDEATHSIG` (Linux) so the kernel is reaped when the main process dies; manual start/stop plus full cleanup on tray quit
-- **Profiles and subscriptions** — a built-in default profile (DIRECT-only) plus URL subscriptions with structural pre-check and a kernel `-t` validation pass; update, delete and activate, and switching profiles really restarts the kernel
+- **Profiles and subscriptions** — a built-in default profile (DIRECT-only), URL subscriptions, and local YAML imports through the native file picker; every source passes structural pre-check and kernel `-t` validation before atomic storage and activation
+- **Offline Geo databases** — `GeoSite.dat`, `GeoIP.dat`, and `Country.mmdb` ship with every package, are restored locally without network access, and can be updated explicitly from Settings
 - **Proxy groups and latency tests** — subscription nodes rendered per group, rule/global/direct mode switched live through the controller; per-node and per-group delay tests with threshold-based coloring
 - **Connections and live traffic** — a per-second controller snapshot poll showing process, target, chain, rule and per-connection up/down bytes; close a single connection or all of them; the overview shows live speed and active connections
 - **System proxy** — Windows writes the current user's Internet Settings and broadcasts via WinINet; Linux supports GNOME/Cinnamon sessions through `gsettings`. The user's original settings are saved atomically before enabling and restored on disable, core stop or crash recovery
@@ -68,7 +69,7 @@ cargo run
 
 The pinned kernel is committed with the source (`kernel/<version>/pc-mihomo.exe` on Windows, `kernel/<version>/pc-mihomo` on Linux), so a fresh clone can launch the real kernel right away. macOS binaries are not committed; download the release listed in `kernel/<version>/manifest.json` under `targets.macos-*` and verify its SHA-256.
 
-On first launch the app initializes `config/` and `data/` on the current platform, including a DIRECT-only default config and a randomly generated controller secret.
+On first launch the app initializes `config/` and `data/` on the current platform, including a DIRECT-only default config, a randomly generated controller secret, and an offline-verified copy of the bundled Geo databases.
 
 ### Packages and releases
 
@@ -78,7 +79,7 @@ pwsh -NoLogo -NoProfile -File .\packaging\windows\build-installer.ps1
 
 The output is `dist\pure-clash-<version>-windows-x64-setup.exe`, a per-user installation into `%LOCALAPPDATA%\Programs\Pure Clash` that never asks for administrator rights.
 
-Linux deb / rpm / AppImage and the Windows NSIS installer are built automatically by GitHub Actions when a `v*` tag is pushed, then published to [Releases](https://github.com/prime-zt/pure-clash/releases); the tag version must match the Cargo package version. deb/rpm install into `/opt/pure-clash` and create a `/usr/bin/pure-clash` symlink, the AppImage runs as-is, and all three bundle the kernel and license files.
+Linux deb / rpm / AppImage and the Windows NSIS installer are built automatically by GitHub Actions when a `v*` tag is pushed, then published to [Releases](https://github.com/prime-zt/pure-clash/releases); the tag version must match the Cargo package version. deb/rpm install into `/opt/pure-clash` and create a `/usr/bin/pure-clash` symlink, the AppImage runs as-is, and every package bundles the kernel, Geo databases, manifests, and license files.
 
 ### Development checks
 
@@ -95,6 +96,8 @@ GPUI is still pre-1.0; this project pins `0.2.2`. Verify the target version's of
 
 The bundled Mihomo kernel is version-pinned: `kernel/<version>/manifest.json` records the version, license and source URL, while `targets` keeps the download URL, size and SHA-256 per build target. Build scripts and the installer verify file presence and hashes; the app never blindly follows GitHub latest. The kernel is renamed `pc-mihomo` to avoid colliding with other proxy clients' processes.
 
+The Geo snapshot is pinned independently in `geodata/manifest.json` to one commit of the official MetaCubeX rule-data repository. Build and packaging checks verify all three files; Settings updates them as one rollback-capable snapshot and never performs a hidden download while validating a subscription.
+
 ## Security model
 
 - The controller listens on `127.0.0.1` only, with a strong random secret generated per install and never written to logs
@@ -107,7 +110,6 @@ See the [technical design document](docs/pure-clash-architecture.md) for the ful
 ## Roadmap
 
 - Rules page and log/memory monitoring (controller `/rules`, `/logs`, `/memory`)
-- Local YAML profile import (currently URL subscriptions only)
 - Linux credential storage and system proxy for other desktops such as KDE
 - Full macOS support (kernel guarding, window behavior, TUN boundary)
 - Code signing and an update channel
@@ -127,6 +129,6 @@ This project itself contains a large amount of AI vibe coding, and the repositor
 
 This project is licensed under [GPL-3.0](LICENSE).
 
-The bundled Mihomo kernel is an unmodified upstream GPL-3.0 binary: the full license text (`LICENSE`) and third-party notice (`NOTICE.md`) live in `kernel/<version>/`, `manifest.json` records the matching source URL, and the installer ships these files together with the kernel.
+The bundled Mihomo kernel is an unmodified upstream GPL-3.0 binary: the full license text (`LICENSE`) and third-party notice (`NOTICE.md`) live in `kernel/<version>/`, `manifest.json` records the matching source URL, and the installer ships these files together with the kernel. The bundled MetaCubeX rule data is also GPL-3.0; its pinned source, license, and notice live in `geodata/`.
 
 Pure Clash is not affiliated with MetaCubeX, and nothing here represents official endorsement from the upstream project. The name Pure Clash deliberately avoids the `mihomo` token that the upstream reserves.

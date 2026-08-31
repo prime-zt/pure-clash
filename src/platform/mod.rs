@@ -194,6 +194,8 @@ pub(crate) struct AppPaths {
     pub(crate) profiles_dir: PathBuf,
     /// 随包内核根目录。
     pub(crate) kernel_dir: PathBuf,
+    /// 随包 Geo 数据资源目录；运行时复制到 `mihomo_data_dir`，在线更新不修改此目录。
+    pub(crate) geodata_resource_dir: PathBuf,
 }
 
 impl AppPaths {
@@ -214,6 +216,7 @@ impl AppPaths {
             config_dir,
             data_dir,
             kernel_dir: program_dir.join("kernel"),
+            geodata_resource_dir: program_dir.join("geodata"),
         }
     }
 
@@ -248,6 +251,7 @@ impl AppPaths {
                 config_dir,
                 data_dir,
                 kernel_dir: platform_kernel_dir(program_dir),
+                geodata_resource_dir: platform_geodata_dir(program_dir),
             })
         }
     }
@@ -296,10 +300,25 @@ fn platform_kernel_dir(program_dir: &Path) -> PathBuf {
         .join("kernel")
 }
 
+#[cfg(target_os = "macos")]
+fn platform_geodata_dir(program_dir: &Path) -> PathBuf {
+    // Geo 数据与内核一样属于签名后的只读资源，首次启动再复制到用户数据目录。
+    program_dir
+        .parent()
+        .unwrap_or(program_dir)
+        .join("Resources")
+        .join("geodata")
+}
+
 #[cfg(target_os = "linux")]
 fn platform_kernel_dir(program_dir: &Path) -> PathBuf {
     // Linux 按便携式/AppImage 布局准备；发行包可在此处扩展 `/usr/lib` 查找。
     program_dir.join("kernel")
+}
+
+#[cfg(target_os = "linux")]
+fn platform_geodata_dir(program_dir: &Path) -> PathBuf {
+    program_dir.join("geodata")
 }
 
 /// 返回当前随包 manifest 指定的 Mihomo 可执行文件名。
@@ -366,6 +385,7 @@ mod tests {
             root.join("config").join("mihomo").join("runtime.yaml")
         );
         assert_eq!(paths.profiles_dir, root.join("config").join("profiles"));
+        assert_eq!(paths.geodata_resource_dir, root.join("geodata"));
         assert_eq!(paths.kernel_dir, root.join("kernel"));
     }
 

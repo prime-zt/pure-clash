@@ -40,6 +40,9 @@ ManifestDPIAware true
 !ifndef KERNEL_MANIFEST_SOURCE
   !error "KERNEL_MANIFEST_SOURCE is required"
 !endif
+!ifndef GEODATA_ROOT
+  !error "GEODATA_ROOT is required"
+!endif
 !ifndef INSTALLER_OUTPUT
   !error "INSTALLER_OUTPUT is required"
 !endif
@@ -128,6 +131,15 @@ Section "主程序（必需）" SecMain
     File "/oname=wintun.dll" "${KERNEL_WINTUN_SOURCE}"
   !endif
 
+  ; 三份 Geo 基础库随包安装，应用首次启动复制到 data/mihomo 后供内核使用。
+  SetOutPath "$INSTDIR\geodata"
+  File "/oname=GeoSite.dat" "${GEODATA_ROOT}\GeoSite.dat"
+  File "/oname=GeoIP.dat" "${GEODATA_ROOT}\GeoIP.dat"
+  File "/oname=Country.mmdb" "${GEODATA_ROOT}\Country.mmdb"
+  File "/oname=manifest.json" "${GEODATA_ROOT}\manifest.json"
+  File "/oname=LICENSE" "${GEODATA_ROOT}\LICENSE"
+  File "/oname=NOTICE.md" "${GEODATA_ROOT}\NOTICE.md"
+
   ; 开始菜单始终提供启动和卸载入口，避免用户只能依赖安装目录。
   CreateDirectory "$SMPROGRAMS\${APP_NAME}"
   CreateShortcut "$SMPROGRAMS\${APP_NAME}\${APP_NAME}.lnk" "$INSTDIR\${APP_EXE}"
@@ -174,6 +186,14 @@ Section "Uninstall"
   Delete "$INSTDIR\kernel\${KERNEL_VERSION}\wintun.dll"
   RMDir "$INSTDIR\kernel\${KERNEL_VERSION}"
   RMDir "$INSTDIR\kernel"
+  ; 仅清理安装资源；data/mihomo 下可能是用户更新版本，继续保留。
+  Delete "$INSTDIR\geodata\GeoSite.dat"
+  Delete "$INSTDIR\geodata\GeoIP.dat"
+  Delete "$INSTDIR\geodata\Country.mmdb"
+  Delete "$INSTDIR\geodata\manifest.json"
+  Delete "$INSTDIR\geodata\LICENSE"
+  Delete "$INSTDIR\geodata\NOTICE.md"
+  RMDir "$INSTDIR\geodata"
   Delete "$INSTDIR\Uninstall.exe"
   RMDir "$INSTDIR"
   DeleteRegKey HKCU "${UNINSTALL_KEY}"

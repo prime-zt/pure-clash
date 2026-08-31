@@ -18,7 +18,8 @@ Pure Clash 用清晰、快速的原生界面管理配置订阅、代理组、连
 ## 功能特性
 
 - **内核生命周期**：启动前先用同版本内核执行 `-t` 校验配置；子进程由 Job Object（Windows）或 `PR_SET_PDEATHSIG`（Linux）守护，主进程异常退出时内核同步回收；支持手动启停与托盘退出前的完整清理
-- **配置与订阅**：内置默认配置（仅 `DIRECT` 出站）+ URL 订阅下载（结构预检与内核 `-t` 双重校验），支持更新、删除与激活，切换配置真实重启内核
+- **配置与订阅**：内置默认配置（仅 `DIRECT` 出站）、URL 订阅与原生文件选择器导入本地 YAML；所有来源均经结构预检和内核 `-t` 校验后原子保存并激活
+- **离线 Geo 数据**：每个安装包内置 `GeoSite.dat`、`GeoIP.dat` 与 `Country.mmdb`，无需联网即可恢复，并可在设置页显式更新
 - **代理组与延迟测试**：分组展示订阅节点，规则/全局/直连三种运行模式经 controller 实时切换；支持单节点与整组延迟测试，结果按阈值分色
 - **连接与实时流量**：每秒轮询 controller 连接快照，展示进程、目标、链路、规则与上下行流量，支持单条或全部关闭；概览页实时显示网速与活动连接数
 - **系统代理**：Windows 写入当前用户 Internet Settings 并经 WinINet 广播生效；Linux 支持 GNOME/Cinnamon 会话（`gsettings`）。开启前原子保存用户原设置，关闭、停内核或异常退出后自动还原
@@ -68,7 +69,7 @@ cargo run
 
 随包内核与源码一起提交（Windows 为 `kernel/<版本>/pc-mihomo.exe`，Linux 为 `kernel/<版本>/pc-mihomo`），clone 后即可启动真实内核。macOS 二进制暂不入库，需按 `kernel/<版本>/manifest.json` 的 `targets.macos-*` 条目手动下载并校验 SHA-256。
 
-首次启动会在对应平台目录初始化 `config/` 与 `data/`，包括只含 `DIRECT` 节点的默认配置与随机生成的 controller secret。
+首次启动会在对应平台目录初始化 `config/` 与 `data/`，包括只含 `DIRECT` 节点的默认配置、随机生成的 controller secret，以及经过离线完整性校验的随包 Geo 数据副本。
 
 ### 安装包与发布
 
@@ -78,7 +79,7 @@ pwsh -NoLogo -NoProfile -File .\packaging\windows\build-installer.ps1
 
 产物为 `dist\pure-clash-<版本>-windows-x64-setup.exe`，per-user 安装到 `%LOCALAPPDATA%\Programs\Pure Clash`，不请求管理员权限。
 
-Linux 提供 deb / rpm / AppImage，Windows 提供 NSIS 安装包：推送 `v*` 标签时由 GitHub Actions 自动构建并发布到 [Releases](https://github.com/prime-zt/pure-clash/releases)，标签版本必须与 Cargo 包版本一致。deb/rpm 安装到 `/opt/pure-clash` 并创建 `/usr/bin/pure-clash` 软链，AppImage 开箱即用，三者均随包内核与许可证文件。
+Linux 提供 deb / rpm / AppImage，Windows 提供 NSIS 安装包：推送 `v*` 标签时由 GitHub Actions 自动构建并发布到 [Releases](https://github.com/prime-zt/pure-clash/releases)，标签版本必须与 Cargo 包版本一致。deb/rpm 安装到 `/opt/pure-clash` 并创建 `/usr/bin/pure-clash` 软链，AppImage 开箱即用，所有发行包均携带内核、Geo 数据、清单与许可证文件。
 
 ### 开发验证
 
@@ -95,6 +96,8 @@ GPUI 仍处于 pre-1.0 阶段，本项目固定使用 `0.2.2`；升级前需核�
 
 随包 Mihomo 内核经过版本锁定：`kernel/<版本>/manifest.json` 记录版本、许可证、源码地址，`targets` 按编译目标记录下载 URL、文件大小与 SHA-256；构建脚本与安装器都会校验文件存在性与哈希一致性，不在启动时盲目跟随 GitHub latest。内核统一重命名为 `pc-mihomo`，避免与其他代理客户端的进程重名。
 
+Geo 快照由 `geodata/manifest.json` 独立锁定到 MetaCubeX 官方规则数据仓库的同一 commit。构建与打包会复核三份文件；设置页将它们作为一套可回滚快照更新，订阅校验过程中不会再隐式下载。
+
 ## 安全模型
 
 - controller 仅监听 `127.0.0.1`，secret 为每次安装随机生成的高强度随机数，不写入日志
@@ -107,7 +110,6 @@ GPUI 仍处于 pre-1.0 阶段，本项目固定使用 `0.2.2`；升级前需核�
 ## 路线图
 
 - 规则页与日志/内存监控（controller `/rules`、`/logs`、`/memory`）
-- 本地 YAML 配置文件导入（当前仅支持 URL 订阅）
 - Linux 凭据存储与 KDE 等其他桌面的系统代理
 - macOS 完整支持（内核守护、窗口行为、TUN 边界）
 - 代码签名与更新通道
@@ -127,6 +129,6 @@ GPUI 仍处于 pre-1.0 阶段，本项目固定使用 `0.2.2`；升级前需核�
 
 本项目代码以 [GPL-3.0](LICENSE) 许可证发布。
 
-随包分发的 Mihomo 内核是未经修改的上游 GPL-3.0 二进制：`kernel/<版本>/` 目录内提供完整许可证文本（`LICENSE`）与第三方组件说明（`NOTICE.md`），`manifest.json` 记录对应版本源码获取地址，安装器随内核一并安装这些文件。
+随包分发的 Mihomo 内核是未经修改的上游 GPL-3.0 二进制：`kernel/<版本>/` 目录内提供完整许可证文本（`LICENSE`）与第三方组件说明（`NOTICE.md`），`manifest.json` 记录对应版本源码获取地址，安装器随内核一并安装这些文件。随包 MetaCubeX 规则数据同样使用 GPL-3.0，固定源码、许可证和说明位于 `geodata/`。
 
 Pure Clash 与 MetaCubeX 无隶属关系，也不代表上游项目对 Pure Clash 提供官方背书。Pure Clash 名称不包含上游限制的 `mihomo` 字样。
