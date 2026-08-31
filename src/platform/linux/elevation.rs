@@ -21,11 +21,13 @@ impl ElevatedProcess {
         self.pid as isize
     }
 
-    pub(crate) fn is_running(&mut self) -> bool {
+    /// 通过 root 服务查询已启动内核是否仍存活；查询不会改变客户端句柄状态。
+    pub(crate) fn is_running(&self) -> bool {
         tun_service::is_core_running(self.pid)
     }
 
-    pub(crate) fn terminate(&mut self) -> Result<()> {
+    /// 请求 root 服务停止对应内核；PID 句柄本身保持不变，便于重复清理。
+    pub(crate) fn terminate(&self) -> Result<()> {
         tun_service::stop_core(self.pid)
     }
 }
