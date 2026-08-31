@@ -1,6 +1,6 @@
 [package]
 name = "pure-clash"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 description = "A lightweight Mihomo desktop client built with Rust and Zed GPUI"
 license = "GPL-3.0"

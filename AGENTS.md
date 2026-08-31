@@ -43,7 +43,7 @@
 ## 技术栈、目录与约定
 
 - Rust 2024 edition；GPUI 使用 Zed `v1.17.2` 对应提交 `c8e44cfa7bda9b2e22c8d6934d78969352e7f61a`，平台后端使用同提交的 `gpui_platform`；`rust-i18n = 4.2.1`；Windows 托盘使用 `tray-icon = 0.24.2`；unix 目标使用 `libc` 发送 SIGTERM 与设置父进程死亡信号；非 Windows 目标使用 `directories = 6.0` 解析标准用户目录。
-- 当前 Cargo 包版本为 `0.2.0`；正式发布标签必须使用匹配的 `v0.2.0`，否则发布流水线会拒绝构建。
+- 当前 Cargo 包版本为 `0.2.1`；正式发布标签必须使用匹配的 `v0.2.1`，否则发布流水线会拒绝构建。
 - UI、业务说明和代码注释使用中文；协议字段、类型名和函数名保留英文。
 - Cargo/可执行文件/安装包前缀统一为 `pure-clash`，界面和 Windows 发行名统一为 `Pure Clash`。
 - 保持单包、小依赖；平台无关路径留在 `src/platform/mod.rs`，只有实际接入系统代理、凭据、进程监管等能力时才新增 `src/platform/windows/`、`linux/` 或 `macos/` 子模块。
