@@ -33,9 +33,10 @@ use uuid::Uuid;
 use crate::platform::{kernel_binary_name, process_guard::terminate_unix};
 
 const INSTALL_ARG: &str = "--linux-tun-service-install";
+const UNINSTALL_ARG: &str = "--linux-tun-service-uninstall";
 const SERVICE_ARG: &str = "--linux-tun-service";
-// 协议 3 是 root runtime bundle 架构；旧的 capabilities/helper 服务必须重装。
-const SERVICE_PROTOCOL: u32 = 3;
+// 协议 4 增加服务程序版本和 runtime 目录事务；旧服务必须重装。
+const SERVICE_PROTOCOL: u32 = 4;
 const SERVICE_NAME: &str = "pure-clash-service.service";
 const SERVICE_BINARY: &str = "/usr/libexec/pure-clash-service";
 const SERVICE_ROOT: &str = "/usr/lib/pure-clash";
@@ -45,6 +46,8 @@ const SERVICE_UNIT: &str = "/etc/systemd/system/pure-clash-service.service";
 const SERVICE_SOCKET: &str = "/run/pure-clash-service/service.sock";
 const RUNTIME_CONFIG: &str = "config.yaml";
 const RUNTIME_MANIFEST: &str = ".pure-clash-runtime.json";
+const RUNTIME_BACKUP: &str = ".runtime-backup";
+const RUNTIME_STAGING_PREFIX: &str = ".runtime-staging-";
 const MAX_CONFIG_BYTES: usize = 12 * 1024 * 1024;
 const MAX_FRAME_SIZE: usize = 32 * 1024 * 1024;
 const MAX_ASSETS: usize = 128;
@@ -92,6 +95,8 @@ enum ServiceRequest {
 #[derive(Debug, Serialize, Deserialize)]
 struct ServiceResponse {
     protocol: u32,
+    /// root 服务程序版本；应用升级后即使协议未变也要刷新已安装副本。
+    service_version: String,
     kernel_version: String,
     ok: bool,
     running: bool,
@@ -103,6 +108,7 @@ impl ServiceResponse {
     fn success(pid: Option<u32>, running: bool) -> Self {
         Self {
             protocol: SERVICE_PROTOCOL,
+            service_version: env!("CARGO_PKG_VERSION").to_owned(),
             kernel_version: env!("PURE_CLASH_DEFAULT_MIHOMO_VERSION").to_owned(),
             ok: true,
             running,
@@ -114,6 +120,7 @@ impl ServiceResponse {
     fn failure(error: &anyhow::Error) -> Self {
         Self {
             protocol: SERVICE_PROTOCOL,
+            service_version: env!("CARGO_PKG_VERSION").to_owned(),
             kernel_version: env!("PURE_CLASH_DEFAULT_MIHOMO_VERSION").to_owned(),
             ok: false,
             running: false,
@@ -125,7 +132,10 @@ impl ServiceResponse {
 
 #[cfg(test)]
 pub(super) fn is_internal_mode(arg: Option<&OsStr>) -> bool {
-    matches!(arg.and_then(OsStr::to_str), Some(INSTALL_ARG | SERVICE_ARG))
+    matches!(
+        arg.and_then(OsStr::to_str),
+        Some(INSTALL_ARG | UNINSTALL_ARG | SERVICE_ARG)
+    )
 }
 
 /// 正常应用启动返回 `Ok(false)`；安装器或 systemd 服务模式完成后返回。
@@ -141,6 +151,11 @@ pub(super) fn run_internal_mode_if_requested() -> Result<bool> {
             let kernel = required_path(args.next(), "Mihomo 路径")?;
             reject_extra_args(args)?;
             install_service(parent_pid, &kernel)?;
+            Ok(true)
+        }
+        Some(UNINSTALL_ARG) => {
+            reject_extra_args(args)?;
+            uninstall_service()?;
             Ok(true)
         }
         Some(SERVICE_ARG) => {
@@ -408,6 +423,7 @@ fn service_is_current() -> bool {
     request(&ServiceRequest::Ping).is_ok_and(|response| {
         response.ok
             && response.protocol == SERVICE_PROTOCOL
+            && response.service_version == env!("CARGO_PKG_VERSION")
             && response.kernel_version == env!("PURE_CLASH_DEFAULT_MIHOMO_VERSION")
     })
 }
@@ -459,6 +475,25 @@ fn install_service(parent_pid: u32, source_kernel: &Path) -> Result<()> {
     )?;
     run_checked("systemctl", &["daemon-reload"])?;
     run_checked("systemctl", &["enable", "--now", SERVICE_NAME])?;
+    Ok(())
+}
+
+/// 供 deb/rpm 卸载脚本调用；参数不接收路径，避免包脚本把任意位置交给 root 删除。
+fn uninstall_service() -> Result<()> {
+    require_root("Linux TUN 服务卸载器")?;
+    let had_unit = Path::new(SERVICE_UNIT).exists();
+    if had_unit {
+        run_checked("systemctl", &["disable", "--now", SERVICE_NAME])?;
+    }
+
+    remove_fixed_file(Path::new(SERVICE_UNIT))?;
+    remove_fixed_file(Path::new(SERVICE_BINARY))?;
+    remove_root_tree(Path::new(SERVICE_ROOT))?;
+    remove_root_tree(Path::new(SERVICE_STATE_ROOT))?;
+    remove_root_tree(Path::new(SERVICE_RUNTIME_ROOT))?;
+    if had_unit {
+        run_checked("systemctl", &["daemon-reload"])?;
+    }
     Ok(())
 }
 
@@ -517,7 +552,7 @@ fn run_service(authorized_uid: libc::uid_t) -> Result<()> {
     ensure_root_directory(Path::new(SERVICE_RUNTIME_ROOT), 0o755)?;
     ensure_root_directory(Path::new(SERVICE_STATE_ROOT), 0o700)?;
     ensure_root_directory(&user_state_directory(authorized_uid), 0o700)?;
-    ensure_root_directory(&runtime_directory(authorized_uid), 0o700)?;
+    recover_runtime_transaction(authorized_uid)?;
     remove_stale_socket(Path::new(SERVICE_SOCKET))?;
     let listener = UnixListener::bind(SERVICE_SOCKET).context("无法创建 Linux TUN 服务 IPC")?;
     fs::set_permissions(SERVICE_SOCKET, fs::Permissions::from_mode(0o660))?;
@@ -572,18 +607,7 @@ fn handle_connection(
             Ok(ServiceResponse::success(pid, pid.is_some()))
         }
         ServiceRequest::Start { bundle } => {
-            let runtime = runtime_directory(authorized_uid);
-            materialize_runtime(authorized_uid, &runtime, &bundle)?;
-            validate_materialized_config(&runtime)?;
-            if let Some(mut running) = core.take() {
-                running.stop()?;
-            }
-            let child = launch_root_core(&runtime)?;
-            let pid = child.id();
-            *core = Some(ManagedCore {
-                child,
-                owner_pid: peer_pid,
-            });
+            let pid = replace_runtime_and_start(authorized_uid, peer_pid, bundle, core)?;
             Ok(ServiceResponse::success(Some(pid), true))
         }
         ServiceRequest::Status { pid } => {
@@ -602,6 +626,124 @@ fn handle_connection(
             }
             Ok(ServiceResponse::success(None, false))
         }
+    }
+}
+
+/// 在隔离目录完成物化和 `-t`，通过后才停止旧内核并切换正式 runtime。
+/// 新内核启动失败时恢复旧目录，并在此前确有运行实例时尽力重新拉起。
+fn replace_runtime_and_start(
+    authorized_uid: libc::uid_t,
+    owner_pid: u32,
+    bundle: RuntimeBundle,
+    core: &mut Option<ManagedCore>,
+) -> Result<u32> {
+    let runtime = runtime_directory(authorized_uid);
+    let backup = backup_runtime_directory(authorized_uid);
+    let staging = staging_runtime_directory(authorized_uid);
+    ensure_root_directory(&staging, 0o700)?;
+
+    let prepared = materialize_runtime(authorized_uid, &staging, &bundle)
+        .and_then(|()| validate_materialized_config(&staging));
+    if let Err(error) = prepared {
+        let _ = remove_root_tree(&staging);
+        return Err(error);
+    }
+
+    let previous_owner = core.as_ref().map(|managed| managed.owner_pid);
+    if let Some(mut running) = core.take()
+        && let Err(error) = running.stop()
+    {
+        if running.is_running() {
+            *core = Some(running);
+        }
+        let _ = remove_root_tree(&staging);
+        return Err(error).context("切换 Linux TUN runtime 前无法停止旧内核");
+    }
+
+    let had_runtime = runtime.exists();
+    let swap_result = (|| {
+        remove_root_tree(&backup)?;
+        if had_runtime {
+            fs::rename(&runtime, &backup).context("无法备份旧 Linux TUN runtime")?;
+        }
+        if let Err(error) = fs::rename(&staging, &runtime) {
+            if had_runtime {
+                let _ = fs::rename(&backup, &runtime);
+            }
+            return Err(error).context("无法提交新 Linux TUN runtime");
+        }
+        if let Some(parent) = runtime.parent()
+            && let Err(error) = sync_directory(parent)
+        {
+            eprintln!("同步 Linux TUN runtime 目录失败：{error:#}");
+        }
+        Ok(())
+    })();
+    if let Err(error) = swap_result {
+        let _ = remove_root_tree(&staging);
+        return Err(with_previous_restart(error, previous_owner, &runtime, core));
+    }
+
+    match launch_root_core(&runtime) {
+        Ok(child) => {
+            let pid = child.id();
+            *core = Some(ManagedCore { child, owner_pid });
+            // 新进程已经稳定启动；备份清理失败不会谎报启动失败，下次请求会再次清理。
+            if let Err(error) = remove_root_tree(&backup) {
+                eprintln!("清理旧 Linux TUN runtime 备份失败：{error:#}");
+            }
+            Ok(pid)
+        }
+        Err(start_error) => {
+            let restore_result: Result<()> = (|| {
+                remove_root_tree(&runtime)?;
+                if had_runtime {
+                    fs::rename(&backup, &runtime).context("无法恢复旧 Linux TUN runtime")?;
+                    sync_directory(runtime.parent().context("Linux TUN runtime 缺少状态目录")?)?;
+                }
+                Ok(())
+            })();
+            let mut error = anyhow!("新 Linux TUN 内核启动失败：{start_error:#}");
+            if let Err(restore_error) = restore_result {
+                error = anyhow!("{error:#}；恢复旧 runtime 失败：{restore_error:#}");
+            } else if let Some(previous_owner) = previous_owner
+                && had_runtime
+            {
+                match launch_root_core(&runtime) {
+                    Ok(child) => {
+                        *core = Some(ManagedCore {
+                            child,
+                            owner_pid: previous_owner,
+                        });
+                    }
+                    Err(restart_error) => {
+                        error = anyhow!("{error:#}；重新启动旧内核失败：{restart_error:#}");
+                    }
+                }
+            }
+            Err(error)
+        }
+    }
+}
+
+fn with_previous_restart(
+    error: anyhow::Error,
+    previous_owner: Option<u32>,
+    runtime: &Path,
+    core: &mut Option<ManagedCore>,
+) -> anyhow::Error {
+    let Some(previous_owner) = previous_owner else {
+        return error;
+    };
+    match launch_root_core(runtime) {
+        Ok(child) => {
+            *core = Some(ManagedCore {
+                child,
+                owner_pid: previous_owner,
+            });
+            error
+        }
+        Err(restart_error) => anyhow!("{error:#}；重新启动旧内核失败：{restart_error:#}"),
     }
 }
 
@@ -1045,6 +1187,36 @@ fn remove_stale_socket(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// 删除固定的 root 文件或符号链接，但绝不跟随链接目标。
+fn remove_fixed_file(path: &Path) -> Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() || metadata.is_file() => {
+            fs::remove_file(path)?;
+        }
+        Ok(_) => bail!("Linux TUN 卸载路径不是文件：{}", path.display()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    Ok(())
+}
+
+/// 删除服务自身的 root 目录；拒绝跟随符号链接或清理非 root 所有的目录。
+fn remove_root_tree(path: &Path) -> Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => fs::remove_file(path)?,
+        Ok(metadata) if metadata.is_dir() && metadata.uid() == 0 => fs::remove_dir_all(path)?,
+        Ok(_) => bail!("Linux TUN 服务目录类型或所有者异常：{}", path.display()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    Ok(())
+}
+
+fn sync_directory(path: &Path) -> Result<()> {
+    fs::File::open(path)?.sync_all()?;
+    Ok(())
+}
+
 fn atomic_install(source: &Path, destination: &Path, mode: u32) -> Result<()> {
     let temporary = destination.with_extension(format!("tmp-{}", std::process::id()));
     let _ = fs::remove_file(&temporary);
@@ -1121,6 +1293,43 @@ fn user_state_directory(uid: libc::uid_t) -> PathBuf {
 
 fn runtime_directory(uid: libc::uid_t) -> PathBuf {
     user_state_directory(uid).join("runtime")
+}
+
+fn backup_runtime_directory(uid: libc::uid_t) -> PathBuf {
+    user_state_directory(uid).join(RUNTIME_BACKUP)
+}
+
+fn staging_runtime_directory(uid: libc::uid_t) -> PathBuf {
+    user_state_directory(uid).join(format!(
+        "{RUNTIME_STAGING_PREFIX}{}",
+        Uuid::new_v4().simple()
+    ))
+}
+
+/// 服务异常退出后恢复上次切换留下的备份，并清理尚未提交的 staging 目录。
+fn recover_runtime_transaction(uid: libc::uid_t) -> Result<()> {
+    let state = user_state_directory(uid);
+    let runtime = runtime_directory(uid);
+    let backup = backup_runtime_directory(uid);
+    if backup.exists() {
+        if runtime.exists() {
+            remove_root_tree(&backup)?;
+        } else {
+            fs::rename(&backup, &runtime).context("无法恢复 Linux TUN runtime 备份")?;
+        }
+    }
+
+    for entry in fs::read_dir(&state)? {
+        let entry = entry?;
+        if entry
+            .file_name()
+            .to_str()
+            .is_some_and(|name| name.starts_with(RUNTIME_STAGING_PREFIX))
+        {
+            remove_root_tree(&entry.path())?;
+        }
+    }
+    Ok(())
 }
 
 fn installed_kernel_path() -> PathBuf {
@@ -1201,6 +1410,7 @@ mod tests {
     #[test]
     fn internal_modes_are_explicit_and_have_no_child_helper() {
         assert!(is_internal_mode(Some(OsStr::new(INSTALL_ARG))));
+        assert!(is_internal_mode(Some(OsStr::new(UNINSTALL_ARG))));
         assert!(is_internal_mode(Some(OsStr::new(SERVICE_ARG))));
         assert!(!is_internal_mode(Some(OsStr::new(
             "--linux-tun-service-child"
@@ -1218,6 +1428,11 @@ mod tests {
             runtime_directory(1000),
             Path::new("/var/lib/pure-clash-service/users/1000/runtime")
         );
+        assert_eq!(
+            backup_runtime_directory(1000),
+            Path::new("/var/lib/pure-clash-service/users/1000/.runtime-backup")
+        );
+        assert!(staging_runtime_directory(1000).starts_with(user_state_directory(1000)));
         assert!(installed_kernel_path().starts_with(SERVICE_ROOT));
         assert_eq!(
             installed_kernel_path().file_name().and_then(OsStr::to_str),
@@ -1269,5 +1484,20 @@ mod tests {
         assert!(encoded.contains("\"bundle\""));
         assert!(!encoded.contains("config_file"));
         assert!(!encoded.contains("kernel"));
+    }
+
+    #[test]
+    fn service_response_identifies_exact_application_version() {
+        let response = ServiceResponse::success(None, false);
+        assert_eq!(response.protocol, SERVICE_PROTOCOL);
+        assert_eq!(response.service_version, env!("CARGO_PKG_VERSION"));
+        assert_eq!(
+            response.kernel_version,
+            env!("PURE_CLASH_DEFAULT_MIHOMO_VERSION")
+        );
+
+        // 旧服务响应缺少 service_version，客户端应拒绝并触发受控重装。
+        let legacy = r#"{"protocol":3,"kernel_version":"1.19.30","ok":true,"running":false,"pid":null,"error":null}"#;
+        assert!(serde_json::from_str::<ServiceResponse>(legacy).is_err());
     }
 }

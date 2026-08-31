@@ -1,9 +1,20 @@
 #!/bin/sh
-# Debian 卸载前脚本：仅删除本包创建的命令软链，不动 /opt 程序目录。
+# Debian 卸载前脚本：完整卸载时先清理动态安装的 root TUN 服务，再删除命令软链。
 set -e
 
 LINK=/usr/bin/pure-clash
+TARGET=/opt/pure-clash/pure-clash
+SERVICE_UNIT=/etc/systemd/system/pure-clash-service.service
+SERVICE_BINARY=/usr/libexec/pure-clash-service
+SERVICE_ROOT=/usr/lib/pure-clash
+SERVICE_STATE=/var/lib/pure-clash-service
 
-if [ "$1" = remove ] && [ -L "$LINK" ]; then
-    rm -f "$LINK"
+if [ "$1" = remove ]; then
+    # prerm 运行时包文件仍存在，内部模式只接受固定路径且要求 root。
+    if [ -x "$TARGET" ] && { [ -e "$SERVICE_UNIT" ] || [ -e "$SERVICE_BINARY" ] || [ -e "$SERVICE_ROOT" ] || [ -e "$SERVICE_STATE" ]; }; then
+        "$TARGET" --linux-tun-service-uninstall
+    fi
+    if [ -L "$LINK" ] && [ "$(readlink "$LINK")" = "$TARGET" ]; then
+        rm -f "$LINK"
+    fi
 fi

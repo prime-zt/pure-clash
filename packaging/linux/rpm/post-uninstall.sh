@@ -1,5 +1,8 @@
 #!/bin/sh
-# RPM 卸载后脚本：仅删除本包创建的命令软链，不动 /opt 程序目录。
-if [ -L /usr/bin/pure-clash ]; then
-    rm -f /usr/bin/pure-clash
+# RPM 的升级事务也会执行旧包 %postun，只有 $1=0 才是完整卸载。
+LINK=/usr/bin/pure-clash
+TARGET=/opt/pure-clash/pure-clash
+
+if [ "$1" -eq 0 ] && [ -L "$LINK" ] && [ "$(readlink "$LINK")" = "$TARGET" ]; then
+    rm -f "$LINK"
 fi

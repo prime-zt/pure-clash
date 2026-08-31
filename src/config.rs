@@ -87,6 +87,10 @@ pub(crate) struct AppConfig {
     /// 启动时使用的 Mihomo 内核版本，默认取随包内核 manifest 的版本。
     #[serde(default = "default_mihomo_version")]
     pub(crate) mihomo_version: String,
+    /// 上次启动版本所携带的内核版本，用于区分“跟随随包版本”和未来的手动选择。
+    /// 旧配置缺少该字段时为 None，首次读取后会补写当前随包版本。
+    #[serde(default)]
+    pub(crate) bundled_mihomo_version: Option<String>,
     /// 界面主题，可选值为 `dark` 或 `light`，默认为 `dark`。
     pub(crate) theme: Theme,
     /// 界面语言，可选值为 `zh-CN` 或 `en-US`，默认为 `zh-CN`。
@@ -101,6 +105,7 @@ impl Default for AppConfig {
     fn default() -> Self {
         Self {
             mihomo_version: default_mihomo_version(),
+            bundled_mihomo_version: Some(default_mihomo_version()),
             theme: Theme::default(),
             language: Language::default(),
             profiles: Vec::new(),
@@ -114,7 +119,8 @@ impl AppConfig {
     pub(crate) fn save(&self, path: &Path) -> Result<()> {
         let mut json = serde_json::to_string_pretty(self).context("无法序列化应用配置")?;
         json.push('\n');
-        fs::write(path, json).with_context(|| format!("无法写入应用配置：{}", path.display()))
+        crate::platform::file::atomic_write(path, json.as_bytes())
+            .with_context(|| format!("无法写入应用配置：{}", path.display()))
     }
 }
 
@@ -160,7 +166,11 @@ fn load_or_create_with_paths(paths: AppPaths) -> Result<LoadedConfig> {
 
     if !paths.default_mihomo_config_file.exists() {
         // 默认文件只在缺失时生成，后续启动不得覆盖用户已经编辑的 YAML。
-        fs::write(&paths.default_mihomo_config_file, DEFAULT_MIHOMO_CONFIG).with_context(|| {
+        crate::platform::file::atomic_write(
+            &paths.default_mihomo_config_file,
+            DEFAULT_MIHOMO_CONFIG.as_bytes(),
+        )
+        .with_context(|| {
             format!(
                 "无法创建默认 Mihomo 配置：{}",
                 paths.default_mihomo_config_file.display()
@@ -168,7 +178,7 @@ fn load_or_create_with_paths(paths: AppPaths) -> Result<LoadedConfig> {
         })?;
     }
 
-    let config = if config_path.exists() {
+    let mut config = if config_path.exists() {
         let content = fs::read_to_string(config_path)
             .with_context(|| format!("无法读取应用配置：{}", config_path.display()))?;
         serde_json::from_str(&content)
@@ -178,6 +188,27 @@ fn load_or_create_with_paths(paths: AppPaths) -> Result<LoadedConfig> {
         config.save(config_path)?;
         config
     };
+
+    // 随包内核升级时，仍跟随旧随包版本或已经失效的选择自动迁移到当前版本。
+    // marker 引入前项目没有内核选择界面，因此旧 schema 可安全视为跟随随包版本。
+    let bundled_version = default_mihomo_version();
+    let follows_bundled = config
+        .bundled_mihomo_version
+        .as_deref()
+        .is_none_or(|previous| config.mihomo_version == previous);
+    let selected_available = crate::kernel::is_available(&paths, &config.mihomo_version);
+    let mut config_changed = false;
+    if (follows_bundled || !selected_available) && config.mihomo_version != bundled_version {
+        config.mihomo_version.clone_from(&bundled_version);
+        config_changed = true;
+    }
+    if config.bundled_mihomo_version.as_deref() != Some(&bundled_version) {
+        config.bundled_mihomo_version = Some(bundled_version);
+        config_changed = true;
+    }
+    if config_changed {
+        config.save(config_path)?;
+    }
 
     Ok(LoadedConfig { config, paths })
 }
@@ -266,6 +297,11 @@ mod tests {
     fn saves_config_changes_immediately() {
         let root = test_dir("save");
         let mut loaded = load_or_create_in(&root).expect("应完成配置初始化");
+        let custom_kernel = root
+            .join("kernel/test-version")
+            .join(crate::platform::kernel_binary_name());
+        fs::create_dir_all(custom_kernel.parent().unwrap()).expect("应创建自定义内核目录");
+        fs::write(&custom_kernel, b"custom-kernel").expect("应创建自定义内核文件");
         loaded.config.theme = Theme::Light;
         loaded.config.language = Language::English;
         loaded.config.mihomo_version = "test-version".to_owned();
@@ -279,6 +315,47 @@ mod tests {
         assert_eq!(reloaded.config.language, Language::English);
         assert_eq!(reloaded.config.mihomo_version, "test-version");
 
+        fs::remove_dir_all(root).expect("应清理测试目录");
+    }
+
+    #[test]
+    fn migrates_legacy_bundled_kernel_version_but_preserves_installed_custom_version() {
+        let root = test_dir("kernel-migration");
+        fs::create_dir_all(root.join("config")).expect("应创建测试配置目录");
+        fs::write(
+            root.join("config/app.json"),
+            r#"{"mihomo_version":"1.18.0"}"#,
+        )
+        .expect("应写入旧 schema 配置");
+
+        let migrated = load_or_create_in(&root).expect("应迁移旧随包内核版本");
+        let bundled = env!("PURE_CLASH_DEFAULT_MIHOMO_VERSION");
+        assert_eq!(migrated.config.mihomo_version, bundled);
+        assert_eq!(
+            migrated.config.bundled_mihomo_version.as_deref(),
+            Some(bundled)
+        );
+
+        let mut following = migrated.config.clone();
+        following.mihomo_version = "previous-bundled".to_owned();
+        following.bundled_mihomo_version = Some("previous-bundled".to_owned());
+        following.save(&root.join("config/app.json")).unwrap();
+        let upgraded = load_or_create_in(&root).expect("应迁移仍跟随上次随包版本的配置");
+        assert_eq!(upgraded.config.mihomo_version, bundled);
+
+        let custom_version = "custom-version";
+        let custom_kernel = root
+            .join("kernel")
+            .join(custom_version)
+            .join(crate::platform::kernel_binary_name());
+        fs::create_dir_all(custom_kernel.parent().unwrap()).expect("应创建自定义内核目录");
+        fs::write(custom_kernel, b"custom-kernel").expect("应创建自定义内核文件");
+        let mut custom = upgraded.config;
+        custom.mihomo_version = custom_version.to_owned();
+        custom.save(&root.join("config/app.json")).unwrap();
+
+        let reloaded = load_or_create_in(&root).expect("应保留仍可用的自定义内核");
+        assert_eq!(reloaded.config.mihomo_version, custom_version);
         fs::remove_dir_all(root).expect("应清理测试目录");
     }
 

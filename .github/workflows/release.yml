@@ -10,7 +10,7 @@ on:
     tags: ["v*"]
 
 permissions:
-  contents: write
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -67,15 +67,20 @@ jobs:
       - name: 构建内核与客户端
         run: cargo build --release
       - name: 安装打包工具
-        run: cargo install --locked cargo-deb cargo-generate-rpm
+        run: |
+          cargo install --locked cargo-deb
+          # 固定已核实支持 pre_uninstall_script 的配置版本，避免打包 schema 漂移。
+          cargo install --locked cargo-generate-rpm --version 0.21.0
       - name: 构建 deb
         run: cargo deb --no-build
       - name: 构建 rpm
         run: cargo generate-rpm
       - name: 构建 AppImage
         run: |
-          curl -sL -o linuxdeploy \
-            https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
+          linuxdeploy_url="https://github.com/linuxdeploy/linuxdeploy/releases/download/1-alpha-20251107-1/linuxdeploy-x86_64.AppImage"
+          linuxdeploy_sha256="c20cd71e3a4e3b80c3483cef793cda3f4e990aca14014d23c544ca3ce1270b4d"
+          curl --fail --location --retry 3 --output linuxdeploy "$linuxdeploy_url"
+          echo "$linuxdeploy_sha256  linuxdeploy" | sha256sum --check --strict
           chmod +x linuxdeploy
           export PATH="$PWD:$PATH"
           # 第一个参数是内核版本目录名（与 manifest 一致），第二个是包版本
@@ -94,6 +99,8 @@ jobs:
   release:
     runs-on: ubuntu-latest
     needs: [windows, linux]
+    permissions:
+      contents: write
     steps:
       - uses: actions/download-artifact@v4
         with:

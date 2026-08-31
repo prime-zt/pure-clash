@@ -261,14 +261,18 @@ impl PureClash {
             config.active_profile = None;
         }
         let active_profile = config.active_profile.clone();
-        if let Err(error) = profile::sync_runtime_file(
+        let runtime_error = profile::sync_runtime_file(
             &paths,
             baseline.as_ref(),
             &config.mihomo_version,
             active_profile.as_deref(),
-        ) {
+        )
+        .err()
+        .map(|error| {
             eprintln!("同步运行时配置失败：{error:#}");
-        }
+            concise_error(&format!("{error:#}"), 200)
+        });
+        let runtime_ready = runtime_error.is_none();
 
         // 上次异常退出可能遗留系统代理托管，启动时按记录恢复用户原有设置。
         if let Some(snapshot) = load_system_proxy_state(&paths) {
@@ -315,7 +319,7 @@ impl PureClash {
             profile_form_name,
             profile_form_url,
             profile_busy: None,
-            profile_error: None,
+            profile_error: runtime_error,
             integration_error: None,
             proxies_loading: false,
             group_expanded: std::collections::HashMap::new(),
@@ -328,7 +332,10 @@ impl PureClash {
             system_tray: None,
         };
         // 开机即按上次记录的激活配置启动内核；失败时只在界面提示，不阻断打开。
-        app.start_core(cx);
+        // 新 runtime 未经校验或未能原子提交时不得沿用磁盘上的旧文件启动。
+        if runtime_ready {
+            app.start_core(cx);
+        }
         app.spawn_connection_poll(cx);
         app
     }
@@ -494,7 +501,9 @@ impl PureClash {
             self.stop_core();
             // TUN 由内核承载，内核停止即失效；同步回退避免界面与下次启动
             // 仍显示/启用已停止的 TUN。
-            self.revert_tun(cx);
+            if let Err(error) = self.revert_tun(cx) {
+                self.integration_error = Some(concise_error(&format!("{error:#}"), 180));
+            }
         } else {
             self.start_core(cx);
         }
@@ -527,9 +536,15 @@ impl PureClash {
                 // 并以普通权限重新拉起内核，保证用户始终有可用代理。
                 if self.tun_enabled {
                     let fallback_message = tun_reverted_error(&error);
-                    self.revert_tun(cx);
-                    self.integration_error = Some(fallback_message);
-                    self.start_core(cx);
+                    if let Err(revert_error) = self.revert_tun(cx) {
+                        self.integration_error = Some(concise_error(
+                            &format!("{fallback_message}；回退配置失败：{revert_error:#}"),
+                            220,
+                        ));
+                    } else {
+                        self.integration_error = Some(fallback_message);
+                        self.start_core(cx);
+                    }
                     self.refresh_tray_texts();
                     cx.notify();
                     return;
@@ -576,10 +591,15 @@ impl PureClash {
                 if !this.tun_enabled {
                     return;
                 }
-                // sync_runtime 会写入关闭 TUN 的配置并重启内核恢复代理。
-                this.revert_tun(cx);
+                // 回退事务会校验并原子写入关闭 TUN 的配置，运行中自动重启内核。
+                let message = tun_reverted_error(&error);
                 // 挂在 integration_error 上：内核重启成功的就绪探针会清掉 mihomo_error。
-                this.integration_error = Some(tun_reverted_error(&error));
+                this.integration_error = Some(match this.revert_tun(cx) {
+                    Ok(()) => message,
+                    Err(revert_error) => {
+                        concise_error(&format!("{message}；回退配置失败：{revert_error:#}"), 220)
+                    }
+                });
                 this.refresh_tray_texts();
                 cx.notify();
             });
@@ -622,18 +642,30 @@ impl PureClash {
                     this.stop_core();
                     // TUN 开启时最常见的失败原因是缺少系统授权或平台 TUN 能力，
                     // 自动回退到无 TUN 的配置并重新拉起内核，保证用户有可用代理。
+                    let mut fallback_error = None;
                     if this.tun_enabled {
-                        // sync_runtime 会写入关闭 TUN 的配置并重启内核恢复代理。
-                        this.revert_tun(cx);
-                        this.start_core(cx);
+                        // 回退事务会校验并原子写入关闭 TUN 的配置，再拉起普通内核。
+                        match this.revert_tun(cx) {
+                            Ok(()) => this.start_core(cx),
+                            Err(revert_error) => {
+                                fallback_error = Some(concise_error(
+                                    &format!("TUN 回退配置失败：{revert_error:#}"),
+                                    180,
+                                ));
+                            }
+                        }
                     }
-                    this.integration_error = Some(
-                        t!(
-                            "app.core_start_failed",
-                            error = concise_error(&format!("{error:#}"), 160)
-                        )
-                        .into_owned(),
-                    );
+                    let start_error = t!(
+                        "app.core_start_failed",
+                        error = concise_error(&format!("{error:#}"), 160)
+                    )
+                    .into_owned();
+                    this.integration_error = Some(match fallback_error {
+                        Some(fallback_error) => {
+                            concise_error(&format!("{start_error}；{fallback_error}"), 240)
+                        }
+                        None => start_error,
+                    });
                     this.refresh_tray_texts();
                     cx.notify();
                 }
@@ -1025,17 +1057,10 @@ impl PureClash {
     /// 回退 TUN：状态、基线与运行时配置同步关闭并持久化。
     ///
     /// 供真实停机路径调用（手动停止内核、启动失败、TUN 未生效回退）；
-    /// 调用时内核应已停止或尚未拉起，sync_runtime 因此只重写 runtime.yaml，
+    /// 调用时内核应已停止或尚未拉起，配置事务因此只重写 runtime.yaml，
     /// 不会重启内核。配置切换重启与托盘退出不走这里，TUN 基线保持不变。
-    fn revert_tun(&mut self, cx: &mut Context<Self>) {
-        self.tun_enabled = false;
-        if let Some(mut baseline) = self.baseline.clone() {
-            baseline.tun_enable = false;
-            if save_baseline(&self.paths, &baseline).is_ok() {
-                self.baseline = Some(baseline);
-            }
-        }
-        self.sync_runtime(cx);
+    fn revert_tun(&mut self, cx: &mut Context<Self>) -> anyhow::Result<()> {
+        self.apply_tun_configuration(false, cx)
     }
 
     /// 开关 TUN：写入本地基线并重新合并校验；内核运行中自动重启生效。
@@ -1050,27 +1075,59 @@ impl PureClash {
             cx.notify();
             return;
         }
-        let Some(mut baseline) = self.baseline.clone() else {
+        let Some(_) = self.baseline.as_ref() else {
             self.integration_error = Some(t!("app.baseline_missing").into_owned());
             self.refresh_tray_texts();
             cx.notify();
             return;
         };
-        baseline.tun_enable = enabled;
-        if let Err(error) = save_baseline(&self.paths, &baseline) {
+        if let Err(error) = self.apply_tun_configuration(enabled, cx) {
             self.integration_error = Some(concise_error(&format!("{error:#}"), 160));
             self.refresh_tray_texts();
             cx.notify();
             return;
         }
-        self.baseline = Some(baseline);
-        self.tun_enabled = enabled;
         self.integration_error = None;
-        // 重新合并 runtime.yaml 后再由 sync_runtime 重启内核；
-        // 仅 restart_core 会带着旧配置拉起，TUN 开关不会生效。
-        self.sync_runtime(cx);
         self.refresh_tray_texts();
         cx.notify();
+    }
+
+    /// 先校验目标 TUN 配置，再提交基线和 runtime；任一写入失败均不重启当前内核。
+    fn apply_tun_configuration(
+        &mut self,
+        enabled: bool,
+        cx: &mut Context<Self>,
+    ) -> anyhow::Result<()> {
+        let previous = self
+            .baseline
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("本地基线不可用"))?;
+        let mut desired = previous.clone();
+        desired.tun_enable = enabled;
+        let runtime = profile::prepare_runtime(
+            &self.paths,
+            Some(&desired),
+            &self.config.mihomo_version,
+            self.active_profile.as_deref(),
+        )?;
+
+        save_baseline(&self.paths, &desired)?;
+        if let Err(error) = write_runtime(&self.paths, &runtime) {
+            let rollback = save_baseline(&self.paths, &previous);
+            return match rollback {
+                Ok(()) => Err(error),
+                Err(rollback_error) => Err(anyhow::anyhow!(
+                    "{error:#}；恢复原本地基线也失败：{rollback_error:#}"
+                )),
+            };
+        }
+
+        self.baseline = Some(desired);
+        self.tun_enabled = enabled;
+        if self.mihomo_process.is_some() {
+            self.restart_core(cx);
+        }
+        Ok(())
     }
 
     /// 切换运行模式：先经 controller 生效，成功后才更新本地状态。
@@ -1255,8 +1312,10 @@ impl PureClash {
                         meta.updated_at = profile::now_secs();
                     }
                     this.save_profiles();
-                    if this.active_profile.as_deref() == Some(id.as_str()) {
-                        this.apply_runtime(&runtime, cx);
+                    if this.active_profile.as_deref() == Some(id.as_str())
+                        && let Err(error) = this.apply_runtime(&runtime, cx)
+                    {
+                        this.profile_error = Some(concise_error(&format!("{error:#}"), 200));
                     }
                     cx.notify();
                 }
@@ -1278,17 +1337,69 @@ impl PureClash {
         let Some(meta) = self.profiles.get(index) else {
             return;
         };
-        let was_active = self.active_profile.as_deref() == Some(meta.id.as_str());
         let id = meta.id.clone();
+        let was_active = self.active_profile.as_deref() == Some(id.as_str());
+        let previous_content = if was_active {
+            match profile::read_profile(&self.paths, &id) {
+                Ok(content) => Some(content),
+                Err(error) => {
+                    self.profile_error = Some(concise_error(&format!("{error:#}"), 200));
+                    cx.notify();
+                    return;
+                }
+            }
+        } else {
+            None
+        };
+        let default_runtime = if was_active {
+            match profile::prepare_runtime(
+                &self.paths,
+                self.baseline.as_ref(),
+                &self.config.mihomo_version,
+                None,
+            ) {
+                Ok(runtime) => Some(runtime),
+                Err(error) => {
+                    self.profile_error = Some(concise_error(&format!("{error:#}"), 200));
+                    cx.notify();
+                    return;
+                }
+            }
+        } else {
+            None
+        };
         if let Err(error) = profile::delete_profile_file(&self.paths, &id) {
             self.profile_error = Some(concise_error(&format!("{error:#}"), 200));
+            cx.notify();
+            return;
+        }
+        if let Some(runtime) = default_runtime
+            && let Err(error) = write_runtime(&self.paths, &runtime)
+        {
+            // runtime 提交失败时恢复刚删除的配置，保持激活态和当前内核均不变。
+            let restore_error = previous_content.as_deref().and_then(|content| {
+                crate::platform::file::atomic_write(
+                    &profile::profile_yaml_path(&self.paths, &id),
+                    content.as_bytes(),
+                )
+                .err()
+            });
+            self.profile_error = Some(match restore_error {
+                Some(restore_error) => concise_error(
+                    &format!("{error:#}；恢复原配置也失败：{restore_error:#}"),
+                    240,
+                ),
+                None => concise_error(&format!("{error:#}"), 200),
+            });
             cx.notify();
             return;
         }
         self.profiles.remove(index);
         if was_active {
             self.active_profile = None;
-            self.sync_runtime(cx);
+            if self.mihomo_process.is_some() {
+                self.restart_core(cx);
+            }
         } else {
             cx.notify();
         }
@@ -1328,9 +1439,16 @@ impl PureClash {
             let _ = this.update(cx, |this, cx| match result {
                 Ok((_, runtime)) => {
                     this.profile_busy = None;
-                    this.active_profile = Some(id);
-                    this.save_profiles();
-                    this.apply_runtime(&runtime, cx);
+                    match this.apply_runtime(&runtime, cx) {
+                        Ok(()) => {
+                            this.active_profile = Some(id);
+                            this.save_profiles();
+                        }
+                        Err(error) => {
+                            this.profile_error = Some(concise_error(&format!("{error:#}"), 200));
+                            cx.notify();
+                        }
+                    }
                 }
                 Err(error) => {
                     this.profile_busy = None;
@@ -1370,10 +1488,17 @@ impl PureClash {
             let _ = this.update(cx, |this, cx| match result {
                 Ok(runtime) => {
                     this.profile_busy = None;
-                    // active_profile 记为空即代表默认配置，下次启动同样生效。
-                    this.active_profile = None;
-                    this.save_profiles();
-                    this.apply_runtime(&runtime, cx);
+                    match this.apply_runtime(&runtime, cx) {
+                        Ok(()) => {
+                            // active_profile 记为空即代表默认配置，下次启动同样生效。
+                            this.active_profile = None;
+                            this.save_profiles();
+                        }
+                        Err(error) => {
+                            this.profile_error = Some(concise_error(&format!("{error:#}"), 200));
+                            cx.notify();
+                        }
+                    }
                 }
                 Err(error) => {
                     this.profile_busy = None;
@@ -1386,17 +1511,15 @@ impl PureClash {
     }
 
     /// 激活/更新配置后的落地动作：运行中则重启内核让配置真实生效。
-    fn apply_runtime(&mut self, runtime_yaml: &str, cx: &mut Context<Self>) {
+    fn apply_runtime(&mut self, runtime_yaml: &str, cx: &mut Context<Self>) -> anyhow::Result<()> {
         // 先落地 runtime.yaml，未运行时下次启动直接使用新配置。
-        if let Err(error) = write_runtime(&self.paths, runtime_yaml) {
-            let detail = concise_error(&format!("{error:#}"), 160);
-            self.profile_error = Some(detail);
-        }
+        write_runtime(&self.paths, runtime_yaml)?;
         if self.mihomo_process.is_some() {
             self.restart_core(cx);
         } else {
             cx.notify();
         }
+        Ok(())
     }
 
     /// 添加订阅后按索引激活：补齐激活态并重启内核。
@@ -1408,27 +1531,17 @@ impl PureClash {
     ) {
         let id = self.profiles.get(index).map(|meta| meta.id.clone());
         if let Some(id) = id {
-            self.active_profile = Some(id);
-            self.save_profiles();
+            match self.apply_runtime(&runtime_yaml, cx) {
+                Ok(()) => {
+                    self.active_profile = Some(id);
+                    self.save_profiles();
+                }
+                Err(error) => {
+                    self.profile_error = Some(concise_error(&format!("{error:#}"), 200));
+                    cx.notify();
+                }
+            }
         }
-        self.apply_runtime(&runtime_yaml, cx);
-    }
-
-    /// 把当前激活态同步到 runtime.yaml；None 回退到内置默认配置。
-    fn sync_runtime(&mut self, cx: &mut Context<Self>) {
-        let version = self.config.mihomo_version.clone();
-        if let Err(error) = profile::sync_runtime_file(
-            &self.paths,
-            self.baseline.as_ref(),
-            &version,
-            self.active_profile.as_deref(),
-        ) {
-            eprintln!("同步运行时配置失败：{error:#}");
-        }
-        if self.mihomo_process.is_some() {
-            self.restart_core(cx);
-        }
-        cx.notify();
     }
 }
 
@@ -1678,6 +1791,31 @@ mod tests {
         assert_eq!(
             t!("app.tun_reverted", locale = "zh-CN", error = "DNS 未接管"),
             "TUN 启用失败，已自动关闭并重启内核：DNS 未接管"
+        );
+        // 错误类文案必须使用 rust-i18n 的 `%{name}` 语法，不能把占位符原样展示。
+        assert_eq!(
+            t!("about.check_failed", locale = "zh-CN", error = "连接超时"),
+            "检查更新失败：连接超时"
+        );
+        assert_eq!(
+            t!("about.check_failed", locale = "en-US", error = "timed out"),
+            "Update check failed: timed out"
+        );
+        assert_eq!(
+            t!(
+                "app.system_proxy_failed",
+                locale = "zh-CN",
+                error = "访问被拒绝"
+            ),
+            "系统代理设置失败：访问被拒绝"
+        );
+        assert_eq!(
+            t!(
+                "app.system_proxy_failed",
+                locale = "en-US",
+                error = "access denied"
+            ),
+            "Failed to set system proxy: access denied"
         );
     }
 

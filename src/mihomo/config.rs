@@ -41,7 +41,7 @@ pub(crate) fn ensure_baseline(paths: &AppPaths) -> Result<LocalBaseline> {
         secret: Uuid::new_v4().to_string(),
         tun_enable: false,
     };
-    fs::write(file, baseline.to_yaml())
+    crate::platform::file::atomic_write(file, baseline.to_yaml().as_bytes())
         .with_context(|| format!("无法写入本地基线配置：{}", file.display()))?;
     Ok(baseline)
 }
@@ -49,7 +49,7 @@ pub(crate) fn ensure_baseline(paths: &AppPaths) -> Result<LocalBaseline> {
 /// 把基线写回 local.yaml；TUN 等客户端级开关更新时调用。
 pub(crate) fn save_baseline(paths: &AppPaths, baseline: &LocalBaseline) -> Result<()> {
     let file = &paths.local_mihomo_config_file;
-    fs::write(file, baseline.to_yaml())
+    crate::platform::file::atomic_write(file, baseline.to_yaml().as_bytes())
         .with_context(|| format!("无法写入本地基线配置：{}", file.display()))
 }
 
@@ -248,7 +248,8 @@ fn parse_profile(profile_yaml: &str) -> Result<Mapping> {
 /// 把合并产物写入 `runtime.yaml`；只在内容校验通过后调用。
 pub(crate) fn write_runtime(paths: &AppPaths, runtime_yaml: &str) -> Result<()> {
     let file = &paths.runtime_mihomo_config_file;
-    fs::write(file, runtime_yaml).with_context(|| format!("无法写入运行时配置：{}", file.display()))
+    crate::platform::file::atomic_write(file, runtime_yaml.as_bytes())
+        .with_context(|| format!("无法写入运行时配置：{}", file.display()))
 }
 
 /// 读取 `runtime.yaml` 中 `proxy-groups` 的组名顺序。

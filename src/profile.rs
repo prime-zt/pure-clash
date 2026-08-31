@@ -65,8 +65,9 @@ pub(crate) fn validate_and_store(
     let baseline = ensure_baseline(paths)?;
     let runtime = merge_runtime(content, &baseline)?;
     validate_kernel_config(paths, version, &runtime)?;
-    fs::write(profile_yaml_path(paths, id), content)
-        .with_context(|| format!("无法写入配置：{}", profile_yaml_path(paths, id).display()))?;
+    let profile_file = profile_yaml_path(paths, id);
+    crate::platform::file::atomic_write(&profile_file, content.as_bytes())
+        .with_context(|| format!("无法写入配置：{}", profile_file.display()))?;
     Ok(runtime)
 }
 
@@ -109,10 +110,22 @@ pub(crate) fn sync_runtime_file(
     version: &str,
     active_id: Option<&str>,
 ) -> Result<()> {
+    let runtime = prepare_runtime(paths, baseline, version, active_id)?;
+    write_runtime(paths, &runtime)
+}
+
+/// 在内存中生成当前激活配置的 runtime，并用目标版本内核完成终审。
+///
+/// 成功返回完整 YAML，但不修改磁盘；调用方可在其他状态准备就绪后原子提交。
+pub(crate) fn prepare_runtime(
+    paths: &AppPaths,
+    baseline: Option<&crate::mihomo::config::LocalBaseline>,
+    version: &str,
+    active_id: Option<&str>,
+) -> Result<String> {
     let Some(baseline) = baseline else {
         bail!("本地基线不可用，无法生成运行时配置");
     };
-    let _ = version;
     let runtime = match active_id {
         Some(id) => {
             let content = read_profile(paths, id)?;
@@ -126,7 +139,8 @@ pub(crate) fn sync_runtime_file(
             merge_runtime(&content, baseline)?
         }
     };
-    write_runtime(paths, &runtime)
+    validate_kernel_config(paths, version, &runtime)?;
+    Ok(runtime)
 }
 
 /// 创建订阅类型配置的元数据。

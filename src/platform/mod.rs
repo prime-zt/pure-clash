@@ -21,6 +21,7 @@ pub(crate) mod linux;
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 pub(crate) mod tray;
 
+pub(crate) mod file;
 /// 内核子进程的平台守护与终止策略；各平台提供同名 `KernelProcessGuard`。
 pub(crate) mod process_guard;
 

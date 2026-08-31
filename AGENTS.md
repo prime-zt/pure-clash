@@ -11,11 +11,11 @@
 
 - `src/main.rs`：应用入口、快捷键和原生窗口创建。
 - `src/app/`：界面模块。`mod.rs` 持有 Pure Clash 状态与业务逻辑（内核生命周期、系统代理/TUN、订阅管线、后台任务与共享渲染助手），渲染按区域拆分子模块：`frame.rs`（标题栏、状态徽标、窗口按钮、Linux 客户端装饰）、`sidebar.rs`（侧栏与内核卡片）、`header.rs`（页面路由与页头开关芯片）、`overview.rs`/`proxies.rs`/`connections.rs`/`profiles.rs`/`settings.rs`/`about.rs`（五个基础页面加关于页，含版本、源码仓库、开源组件清单与 GitHub Releases 更新检查）。子模块经 `use super::*` 访问父模块的私有状态，跨页面复用的小组件（连接行、横幅等）以 `pub(super)` 暴露。
-- `src/config.rs`：`AppConfig`、程序目录初始化、`config/app.json` 读取与即时持久化。
-- `src/platform/mod.rs`：跨平台目录、内核进程守护接口、托盘抽象和主窗口装饰策略；各平台行为差异统一从这里解析。
+- `src/config.rs`：`AppConfig`、程序目录初始化、`config/app.json` 读取与即时原子持久化；通过随包版本 marker 迁移仍跟随旧随包内核的配置。
+- `src/platform/mod.rs`：跨平台目录、内核进程守护接口、托盘抽象和主窗口装饰策略；各平台行为差异统一从这里解析。`src/platform/file.rs` 提供 Windows `MoveFileExW` 与 unix `rename` 的同目录原子替换。
 - `src/platform/windows/job.rs`：Windows Mihomo 专用 Job Object，启用 `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`。
 - `src/platform/linux/child_guard.rs`：Linux 普通内核进程守护，通过 `PR_SET_PDEATHSIG` 保证主进程异常退出时内核被回收，由 `KernelProcessGuard` 调用。
-- `src/platform/linux/tun_service.rs`：Linux TUN 一次授权服务的安装、按 UID 隔离的长度前缀 JSON IPC、runtime bundle 物化与服务端 root 内核生命周期；服务把配置与资源原子写入 `/var/lib/pure-clash-service/users/<uid>/runtime` 并以 root 运行 Mihomo，不降权、不设置 capabilities，监视 GUI PID 并自动回收内核。
+- `src/platform/linux/tun_service.rs`：Linux TUN 一次授权服务的安装/卸载、按 UID 隔离的长度前缀 JSON IPC、runtime bundle 物化与服务端 root 内核生命周期；服务先在同一状态目录 staging 完整 bundle 并执行 `mihomo -t`，通过后才停止旧内核和原子切换 runtime，新内核启动失败会恢复备份并尽力重启旧内核。服务版本与协议、随包内核版本共同决定是否刷新 root 副本。
 - `src/platform/linux/elevation.rs`：Linux TUN 服务客户端，把 `launch_elevated`/`ElevatedProcess` 映射到服务 IPC，并在 GPUI 与单实例初始化前分流安装器与 systemd 服务模式。
 - `src/platform/{windows,linux}/process_guard.rs`：各平台同名 `KernelProcessGuard`，统一内核子进程的守护（Job Object / pdeathsig）与终止策略（TerminateProcess / SIGTERM→SIGKILL），`mihomo` 模块保持平台无关。
 - `src/platform/windows/single_instance.rs`：Windows 当前会话单实例锁；后续启动只通知首实例恢复并激活主窗口。
@@ -35,8 +35,8 @@
 - `src/assets.rs`、`assets/icons/`：嵌入式 SVG 资源注册与本地图标；`app.svg` 是带背景的应用图标源文件。
 - `build.rs`、`src/kernel.rs`、`kernel/{版本}/`：从随包 manifest 注入默认内核版本，并按启动配置解析运行时路径。
 - `packaging/windows/`：Windows 专属的 NSIS 安装器定义和 PowerShell 7 打包入口。
-- `packaging/linux/`：Linux 发行包资源（desktop 条目、图标、deb 维护脚本、rpm scriptlet、AppImage 组装脚本）；deb/rpm 元数据在 `Cargo.toml` 的 `package.metadata.deb` / `generate-rpm`，安装布局为 `/opt/pure-clash` + `/usr/bin` 软链，内核版本目录升级时同步两段 assets。
-- `.github/workflows/release.yml`：推送 `v*` 标签触发的发布流水线，构建 Windows NSIS 与 Linux deb/rpm/AppImage 并发布 GitHub Release；标签版本与 Cargo 版本不一致时直接失败。
+- `packaging/linux/`：Linux 发行包资源（desktop 条目、图标、deb 维护脚本、rpm scriptlet、AppImage 组装脚本）；deb/rpm 元数据在 `Cargo.toml` 的 `package.metadata.deb` / `generate-rpm`，安装布局为 `/opt/pure-clash` + `/usr/bin` 软链，内核版本目录升级时同步两段 assets。完整卸载会在程序文件移除前调用内部 root 服务清理入口，升级事务不会删除软链或服务。
+- `.github/workflows/release.yml`：推送 `v*` 标签触发的发布流水线，构建 Windows NSIS 与 Linux deb/rpm/AppImage 并发布 GitHub Release；标签版本与 Cargo 版本不一致时直接失败。构建 job 默认只有 `contents: read`，仅发布 job 可写；外部 AppImage 工具固定不可变版本并校验官方 SHA-256。
 - `docs/pure-clash-architecture.md`：Mihomo 进程、REST/WebSocket 控制、安全、配置和产品化技术基线。
 
 ## 技术栈、目录与约定
@@ -68,7 +68,7 @@
 - 随包内核统一重命名为 `pc-mihomo`（Windows 为 `pc-mihomo.exe`），避免与其他代理客户端的 Mihomo 进程重名。内核文件随仓库提交：Windows 与 Linux x64 已入库，macOS 二进制暂不入库，需按 manifest 锁定的下载地址与 SHA-256 手动放置。macOS 资源根目录预留为 `.app/Contents/Resources/kernel`，Linux 按可执行文件旁的便携式/AppImage 布局解析内核，正式系统包在发行方案确定后扩展资源查找策略。Linux 自动补齐内核可执行位；macOS 要求文件预先具备可执行权限。
 - `kernel/{版本}/manifest.json` 是随包版本和各平台运行时文件名的唯一来源：顶层记录版本、源码与许可证信息，`targets` 按编译目标（如 `windows-amd64`、`linux-amd64`、`macos-amd64`、`macos-aarch64`）记录二进制名、官方下载地址、大小和 SHA-256。构建与打包只要求当前编译目标的内核文件存在，`build.rs` 与安装器脚本各自从 `targets` 读取对应条目，要求目录名与 `version` 一致，`binary` 必须是安全的单文件名。
 - Windows 安装器只安装和卸载当前 manifest `targets.windows-amd64` 中的 `pc-mihomo.exe`，升级时不主动清理历史安装遗留的 `mihomo.exe`。
-- `AppConfig` 使用 serde 默认值兼容缺失字段；`mihomo_version` 默认由构建脚本从随包 manifest 注入，启动时据此确定当前内核目录；`theme` 支持 `dark` / `light`，界面修改后立即写回。
+- `AppConfig` 使用 serde 默认值兼容缺失字段；`mihomo_version` 默认由构建脚本从随包 manifest 注入，`bundled_mihomo_version` 记录上次随包版本：仍跟随随包版本或所选内核已经不存在时自动迁移到当前随包版本，实际存在的手动选择予以保留。主配置、Mihomo 基线、默认配置、profile 和 runtime 均使用同目录临时文件原子替换；`theme` 支持 `dark` / `light`，界面修改后立即写回。
 - `AppConfig.language` 使用 `zh-CN` / `en-US`，默认 `zh-CN`；切换语言后立即调用 `rust_i18n::set_locale` 并持久化。界面文案必须加入两个 locale 文件，不得继续在渲染代码中硬编码业务文案。
 - 后续敏感凭据仍应使用 Windows Credential Manager 或 DPAPI，不写入日志和普通 JSON/YAML。
 - Pure Clash 项目自身代码以 GPL-3.0 发布：根目录 `LICENSE` 是唯一许可文本，Cargo 声明 `license = "GPL-3.0"`，修改代码不得移除或弱化许可证声明。随包 Mihomo 内核同样使用 GPL-3.0，义务经 `kernel/<版本>/` 目录内的 `LICENSE`、`NOTICE.md` 与 `manifest.json` 源码地址履行，安装器随内核一并安装。`Pure Clash` 名称不包含上游限制的 `mihomo` 字样。
@@ -79,6 +79,6 @@
 - GPUI 0.2.2 的 `svg()` 元素按单色 alpha mask 绘制且必须设置 `text_color`；带背景色的 `app.svg` 在标题栏中必须使用 `img()`，其他单色界面图标继续使用 `svg()`。
 - Windows release 使用 GUI 子系统，debug 保留控制台；NSIS 继续采用 per-user 安装模型。TUN 等提权能力不得借此安装器静默获取管理员权限。
 - 当前实现的平台能力：Windows x64 支持内核启停、系统代理、TUN、托盘与单实例；Linux x64 支持内核启停（异常退出由 pdeathsig 回收）、GNOME/Cinnamon `gsettings` 系统代理、基于 polkit 一次授权 root systemd 服务的 TUN（对齐 Clash Verge Rev 的服务模型）、SNI 托盘（GNOME 需 AppIndicator 扩展）与单实例，其中 Linux TUN 已在 Fedora 44 x64（Wayland/GNOME）完成真实路由/DNS 授权验证，其他桌面与发行版未经实测。Linux 凭据存储仍未实现，deb/rpm/AppImage 由 GitHub Actions 在推送标签时构建并发布 Release；macOS 只完成目录、资源路径与窗口装饰边界预留。
-- 页面上的内核启动/停止已接入真实 Mihomo 进程；启动固定使用 `config/mihomo/runtime.yaml` 和 `data/mihomo/`，并先以同一内核执行 `-t`。应用启动时按 `app.json` 记录的激活配置自动拉起内核，激活/切换配置即时持久化、下次启动原样恢复；启动失败只在界面提示，不阻断打开。runtime.yaml 由客户端本地基线 `config/mihomo/local.yaml`（含随机 controller secret，禁止写入日志）与激活的配置文件合并生成，端口等本机字段一律以本地基线为准，订阅不得开启 TUN。配置页首行是内置默认配置（仅 `DIRECT` 出站，`active_profile` 为空即选中态，点击经同一 `-t` 链路切回），其下支持 URL 订阅下载（结构预检 + 内核 `-t` 双重校验）、更新、删除与激活，激活/切换配置会真实重启内核；代理页与运行模式切换通过仅回环的 external controller（`PATCH /configs`、`GET/PUT /proxies`）真实生效，节点/分组延迟测试用 `GET /proxies/{name}/delay` 与 `GET /group/{name}/delay`（gstatic 204 探测、5 秒超时，手动结果覆盖 /proxies 历史值，失败显示超时）。连接与流量为真实实现：应用常驻任务每秒轮询 `GET /connections`，差分累计字节数得到实时网速，连接列表支持单条与全部关闭（`DELETE /connections[/{id}]`），渲染上限 200 行；响应中 `connections` 可为 null、失败延迟记为 0，解析时均已兜底，接口字段以官方文档和内核实测为准。设置页展示真实 controller 地址；系统代理与 TUN 开关为真实实现，标题栏以同款徽标展示两者开关状态。
+- 页面上的内核启动/停止已接入真实 Mihomo 进程；启动固定使用 `config/mihomo/runtime.yaml` 和 `data/mihomo/`，并先以同一内核执行 `-t`。应用启动时按 `app.json` 记录的激活配置自动拉起内核；runtime 合并、`-t` 或原子提交任一步失败时保留旧文件且不得启动/重启内核，profile 激活态只在 runtime 提交成功后更新。runtime.yaml 由客户端本地基线 `config/mihomo/local.yaml`（含随机 controller secret，禁止写入日志）与激活的配置文件合并生成，端口等本机字段一律以本地基线为准，订阅不得开启 TUN。配置页首行是内置默认配置（仅 `DIRECT` 出站，`active_profile` 为空即选中态，点击经同一 `-t` 链路切回），其下支持 URL 订阅下载（结构预检 + 内核 `-t` 双重校验）、更新、删除与激活，激活/切换配置会真实重启内核；代理页与运行模式切换通过仅回环的 external controller（`PATCH /configs`、`GET/PUT /proxies`）真实生效，节点/分组延迟测试用 `GET /proxies/{name}/delay` 与 `GET /group/{name}/delay`（gstatic 204 探测、5 秒超时，手动结果覆盖 /proxies 历史值，失败显示超时）。连接与流量为真实实现：应用常驻任务每秒轮询 `GET /connections`，差分累计字节数得到实时网速，连接列表支持单条与全部关闭（`DELETE /connections[/{id}]`），渲染上限 200 行；响应中 `connections` 可为 null、失败延迟记为 0，解析时均已兜底，接口字段以官方文档和内核实测为准。设置页展示真实 controller 地址；系统代理与 TUN 开关为真实实现，标题栏以同款徽标展示两者开关状态。
 - 页面借鉴 Clash Verge Rev 的功能分区，但采用独立的紧凑 GPUI 原生设计；页面保留内核开关、模式切换、代理节点与延迟测试、连接、配置和系统集成状态。
 - GPUI 仍处于 pre-1.0 阶段，升级前必须按目标版本官方示例核对 API。
