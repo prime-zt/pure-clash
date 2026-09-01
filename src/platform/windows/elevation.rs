@@ -8,7 +8,7 @@ use std::path::Path;
 use anyhow::{Result, anyhow};
 use windows_sys::Win32::Foundation::{CloseHandle, S_FALSE, S_OK, WAIT_TIMEOUT};
 use windows_sys::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize};
-use windows_sys::Win32::System::Threading::{TerminateProcess, WaitForSingleObject};
+use windows_sys::Win32::System::Threading::{GetProcessId, TerminateProcess, WaitForSingleObject};
 use windows_sys::Win32::UI::Shell::{
     SEE_MASK_NOASYNC, SEE_MASK_NOCLOSEPROCESS, SEE_MASK_UNICODE, SHELLEXECUTEINFOW, ShellExecuteExW,
 };
@@ -18,12 +18,18 @@ use windows_sys::Win32::UI::WindowsAndMessaging::SW_HIDE;
 #[derive(Debug)]
 pub(crate) struct ElevatedProcess {
     handle: isize,
+    pid: u32,
 }
 
 impl ElevatedProcess {
     /// 以原始句柄形式提供给 Job Object 与终止逻辑使用。
     pub(crate) fn handle(&self) -> isize {
         self.handle
+    }
+
+    /// 进程 ID；供运行日志记录。
+    pub(crate) fn pid(&self) -> u32 {
+        self.pid
     }
 
     /// 进程是否仍然存活；`WaitForSingleObject` 立即返回且未触发即存活。
@@ -85,8 +91,10 @@ pub(crate) fn launch_elevated(
             std::io::Error::last_os_error().raw_os_error().unwrap_or(0)
         ));
     }
+    let pid = unsafe { GetProcessId(info.hProcess) };
     Ok(ElevatedProcess {
         handle: info.hProcess as isize,
+        pid,
     })
 }
 

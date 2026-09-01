@@ -1,7 +1,9 @@
 use std::{
     fs,
+    io::{BufRead, BufReader},
     path::Path,
     process::{Child, Command, Stdio},
+    sync::Arc,
     thread,
     time::Duration,
 };
@@ -10,6 +12,7 @@ use anyhow::{Context, Result, bail};
 
 use crate::{
     kernel,
+    logging::KernelLogWriter,
     platform::{AppPaths, ElevatedProcess, KernelProcessGuard, launch_elevated},
 };
 
@@ -69,48 +72,75 @@ impl MihomoProcess {
         let executable = kernel::bundled_path(paths, version)
             .with_context(|| format!("Mihomo 版本目录无效：{version}"))?;
         if !executable.is_file() {
+            log_error!("kernel", "Mihomo 内核文件不存在：{}", executable.display());
             bail!("Mihomo 内核文件不存在：{}", executable.display());
         }
         if !config_file.is_file() {
+            log_error!("kernel", "内核配置文件不存在：{}", config_file.display());
             bail!("内核配置文件不存在：{}", config_file.display());
         }
-        fs::create_dir_all(&paths.mihomo_data_dir).with_context(|| {
-            format!(
-                "无法创建 Mihomo 数据目录：{}",
-                paths.mihomo_data_dir.display()
-            )
-        })?;
+        fs::create_dir_all(&paths.mihomo_data_dir)
+            .with_context(|| {
+                format!(
+                    "无法创建 Mihomo 数据目录：{}",
+                    paths.mihomo_data_dir.display()
+                )
+            })
+            .inspect_err(|error| {
+                log_error!("kernel", "无法创建 Mihomo 数据目录：{error:#}");
+            })?;
 
-        validate_config(&executable, paths, config_file)?;
+        if let Err(error) = validate_config(&executable, paths, config_file) {
+            // 校验失败原因可能引用订阅内容，写入日志前由日志层统一脱敏。
+            log_error!("kernel", "启动前 Mihomo 配置校验失败：{error:#}");
+            return Err(error);
+        }
 
         let mut guard = KernelProcessGuard::new()?;
         let mut child = if elevated {
+            // 提权进程经 ShellExecuteExW(UAC)/systemd 服务创建，stdout 无法由
+            // 客户端捕获：Windows 无句柄继承、Linux 输出进入 journal。
             let process = launch_elevated(
                 &executable,
                 &paths.mihomo_data_dir,
                 config_file,
                 allow_interactive_elevation,
             )
+            .inspect_err(|error| {
+                log_error!("kernel", "无法以所需系统权限启动 Mihomo 内核：{error:#}");
+            })
             .context("无法以所需系统权限启动 Mihomo 内核")?;
+            log_info!(
+                "kernel",
+                "提权内核已创建，输出不经客户端捕获（UAC/systemd journal）"
+            );
             if let Err(error) = guard.attach_handle(process.handle()) {
                 // 提权进程已经创建，守护挂接失败时必须主动终止，不能只关闭句柄。
                 let _ = process.terminate();
+                log_error!("kernel", "无法为提权的内核进程挂接平台守护：{error:#}");
                 return Err(error).context("无法为提权的内核进程挂接平台守护");
             }
             KernelChild::Elevated(process)
         } else {
             let mut command = mihomo_command(&executable, paths, config_file);
-            command.stdout(Stdio::null()).stderr(Stdio::null());
+            // stdout/stderr 经泵线程落入 kernel.log；即使日志文件打不开也保持
+            // 管道被持续排空，避免内核写满管道后阻塞。
+            command.stdout(Stdio::piped()).stderr(Stdio::piped());
             let mut child = command
                 .spawn()
+                .inspect_err(|error| {
+                    log_error!("kernel", "无法启动 Mihomo 内核进程：{error:#}");
+                })
                 .with_context(|| format!("无法启动 Mihomo 内核：{}", executable.display()))?;
 
             if let Err(error) = guard.attach(&child) {
                 // 挂接守护失败时不得留下不受应用生命周期管理的后台进程。
                 let _ = child.kill();
                 let _ = child.wait();
+                log_error!("kernel", "无法为内核进程挂接平台守护：{error:#}");
                 return Err(error).context("无法为内核进程挂接平台守护");
             }
+            spawn_kernel_log_pumps(&mut child, paths);
             KernelChild::Normal(child)
         };
 
@@ -118,6 +148,10 @@ impl MihomoProcess {
         thread::sleep(Duration::from_millis(150));
         if child.exited().context("无法读取 Mihomo 启动状态")? {
             let _ = child.terminate();
+            log_error!(
+                "kernel",
+                "Mihomo 启动后立即退出（提权被拒绝或配置存在运行期错误）"
+            );
             bail!("Mihomo 启动后立即退出（提权被拒绝或配置存在运行期错误）");
         }
 
@@ -141,6 +175,56 @@ impl MihomoProcess {
     pub(crate) fn is_running(&mut self) -> bool {
         !self.child.exited().unwrap_or(true)
     }
+
+    /// 当前内核进程 ID；供运行日志记录。
+    pub(crate) fn pid(&self) -> Option<u32> {
+        match &self.child {
+            KernelChild::Normal(child) => Some(child.id()),
+            KernelChild::Elevated(process) => Some(process.pid()),
+        }
+    }
+}
+
+/// 将内核 stdout/stderr 逐行泵入 kernel.log。
+///
+/// 日志文件打不开时返回的写入器为 `None`，泵线程仍持续读取并丢弃，保证
+/// 内核不会因管道无人读取而阻塞。泵线程与内核进程同生命周期：内核退出后
+/// 管道读到 EOF 自然结束，应用退出时内核由平台守护兜底回收。
+fn spawn_kernel_log_pumps(child: &mut Child, paths: &AppPaths) {
+    let writer = KernelLogWriter::open(&paths.log_dir);
+    if writer.is_none() {
+        log_warn!("kernel", "无法打开内核日志文件，本轮内核输出将被丢弃");
+    }
+    if let Some(stdout) = child.stdout.take() {
+        spawn_kernel_log_pump(stdout, writer.clone());
+    }
+    if let Some(stderr) = child.stderr.take() {
+        spawn_kernel_log_pump(stderr, writer);
+    }
+}
+
+/// 单条管道的泵线程；内核退出后读到 EOF 自然结束。
+fn spawn_kernel_log_pump<R: std::io::Read + Send + 'static>(
+    stream: R,
+    writer: Option<Arc<KernelLogWriter>>,
+) {
+    // 线程创建失败仅剩丢弃流一种选择（系统已无法创建线程），内核随后的
+    // 管道写入会收到错误；该场景实际只在资源耗尽时出现。
+    let _ = thread::Builder::new()
+        .name("pure-clash-kernel-log".to_owned())
+        .spawn(move || {
+            let reader = BufReader::new(stream);
+            for line in reader.lines() {
+                match line {
+                    Ok(line) => {
+                        if let Some(writer) = writer.as_ref() {
+                            writer.write_line(&line);
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
 }
 
 impl Drop for MihomoProcess {

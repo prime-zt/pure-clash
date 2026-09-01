@@ -129,6 +129,10 @@ mod elevation_stub {
             0
         }
 
+        pub(crate) fn pid(&self) -> u32 {
+            0
+        }
+
         pub(crate) fn is_running(&self) -> bool {
             false
         }
@@ -213,6 +217,8 @@ pub(crate) struct AppPaths {
     pub(crate) config_dir: PathBuf,
     /// 应用数据目录。
     pub(crate) data_dir: PathBuf,
+    /// 运行日志（app.log）与内核日志（kernel.log）目录。
+    pub(crate) log_dir: PathBuf,
     /// 主配置文件路径。
     pub(crate) config_file: PathBuf,
     /// Mihomo 配置文件目录。
@@ -250,6 +256,8 @@ impl AppPaths {
             mihomo_data_dir: data_dir.join("mihomo"),
             config_dir,
             data_dir,
+            // Windows 保持与 config/、data/ 并列的便携式布局。
+            log_dir: program_dir.join("log"),
             kernel_dir: program_dir.join("kernel"),
             geodata_resource_dir: program_dir.join("geodata"),
         }
@@ -274,6 +282,12 @@ impl AppPaths {
             let config_dir = project_dirs.config_dir().to_path_buf();
             let data_dir = project_dirs.data_local_dir().to_path_buf();
             let mihomo_config_dir = config_dir.join("mihomo");
+            // 日志属于会话状态：Linux 按 XDG_STATE_HOME 标准放 ~/.local/state；
+            // macOS 无 state 约定时退回本地数据目录下的 log/。
+            let log_dir = project_dirs
+                .state_dir()
+                .map(|dir| dir.join("log"))
+                .unwrap_or_else(|| data_dir.join("log"));
             Ok(Self {
                 program_dir: program_dir.to_path_buf(),
                 config_file: config_dir.join("app.json"),
@@ -285,6 +299,7 @@ impl AppPaths {
                 mihomo_data_dir: data_dir.join("mihomo"),
                 config_dir,
                 data_dir,
+                log_dir,
                 kernel_dir: platform_kernel_dir(program_dir),
                 geodata_resource_dir: platform_geodata_dir(program_dir),
             })
@@ -410,6 +425,7 @@ mod tests {
             root.join("config").join("mihomo").join("runtime.yaml")
         );
         assert_eq!(paths.data_dir, root.join("data"));
+        assert_eq!(paths.log_dir, root.join("log"));
         assert_eq!(paths.mihomo_data_dir, root.join("data").join("mihomo"));
         assert_eq!(
             paths.local_mihomo_config_file,

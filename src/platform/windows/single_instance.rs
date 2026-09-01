@@ -46,7 +46,7 @@ impl Drop for SingleInstance {
         // 先唤醒等待线程再回收句柄，避免应用退出时留下阻塞线程。
         let result = unsafe { SetEvent(self.shutdown_event.as_raw_handle() as HANDLE) };
         if result == 0 {
-            eprintln!("停止单实例监听失败：{}", io::Error::last_os_error());
+            log_warn!("app", "停止单实例监听失败：{}", io::Error::last_os_error());
         }
         if let Some(wait_thread) = self.wait_thread.take() {
             let _ = wait_thread.join();
@@ -132,11 +132,15 @@ fn wait_for_activation(
             }
             result if result == WAIT_OBJECT_0 + 1 => break,
             WAIT_FAILED => {
-                eprintln!("等待单实例激活事件失败：{}", io::Error::last_os_error());
+                log_warn!(
+                    "app",
+                    "等待单实例激活事件失败：{}",
+                    io::Error::last_os_error()
+                );
                 break;
             }
             result => {
-                eprintln!("等待单实例激活事件返回未知状态：{result}");
+                log_warn!("app", "等待单实例激活事件返回未知状态：{result}");
                 break;
             }
         }

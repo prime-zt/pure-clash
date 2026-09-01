@@ -224,6 +224,10 @@ pub(crate) struct PureClash {
     mode: ProxyMode,
     /// controller 返回的真实策略组快照；内核未运行时为空。
     groups: Vec<GroupSnapshot>,
+    /// 运行配置请求失败边沿标记；与连接轮询独立，避免一条请求吞掉另一条日志。
+    runtime_state_failing: bool,
+    /// 连接轮询失败边沿标记：只在失败开始与恢复时各记一条日志。
+    connections_failing: bool,
     /// controller 轮询到的活跃连接（按建立时间序）；内核停止时清空。
     connections: Vec<ConnectionItem>,
     /// 实时上传/下载速度与会话累计字节数；由相邻连接快照差分得出。
@@ -289,12 +293,24 @@ impl PureClash {
         } = loaded_config;
         // 启动时以 AppConfig 指定的版本确定当前内核路径和可用状态。
         let kernel_available = is_available(&paths, &config.mihomo_version);
+        log_info!(
+            "app",
+            "Pure Clash v{} 启动（{}，内核 {}，{}）",
+            Self::CURRENT_VERSION,
+            if startup_mode.is_autostart() {
+                "登录自启"
+            } else {
+                "交互启动"
+            },
+            config.mihomo_version,
+            std::env::consts::OS,
+        );
 
         // 本地基线提供 controller 地址与 secret；失败时仅禁用在线功能。
         let baseline = match ensure_baseline(&paths) {
             Ok(baseline) => Some(baseline),
             Err(error) => {
-                eprintln!("初始化本地基线失败：{error:#}");
+                log_error!("core", "初始化本地基线失败：{error:#}");
                 None
             }
         };
@@ -314,7 +330,7 @@ impl PureClash {
         )
         .err()
         .map(|error| {
-            eprintln!("同步运行时配置失败：{error:#}");
+            log_error!("core", "同步运行时配置失败：{error:#}");
             concise_error(&format!("{error:#}"), 200)
         });
         let runtime_ready = runtime_error.is_none();
@@ -324,9 +340,12 @@ impl PureClash {
             match restore_system_proxy(&snapshot) {
                 Ok(()) => {
                     clear_system_proxy_state(&paths);
-                    eprintln!("检测到上次托管的系统代理，已恢复用户原有设置");
+                    log_info!(
+                        "proxy",
+                        "检测到上次托管的系统代理，启动时已恢复用户原有设置"
+                    );
                 }
-                Err(error) => eprintln!("恢复系统代理设置失败：{error:#}"),
+                Err(error) => log_error!("proxy", "启动自愈恢复系统代理设置失败：{error:#}"),
             }
         }
 
@@ -339,7 +358,7 @@ impl PureClash {
             Ok(AutoStartStatus::Unavailable) => (false, false),
             Err(error) => {
                 // 读取失败不代表平台不支持，保留可操作开关让用户可以直接重试写入。
-                eprintln!("读取登录自启状态失败：{error:#}");
+                log_warn!("autostart", "读取登录自启状态失败：{error:#}");
                 (false, true)
             }
         };
@@ -368,6 +387,8 @@ impl PureClash {
             interactive_elevation_allowed: startup_allows_interactive_elevation(startup_mode),
             mode: ProxyMode::Rule,
             groups: Vec::new(),
+            runtime_state_failing: false,
+            connections_failing: false,
             connections: Vec::new(),
             traffic_down_speed: 0,
             traffic_up_speed: 0,
@@ -501,6 +522,11 @@ impl PureClash {
                     Ok(Some(latest)) => {
                         if crate::app::about::is_newer_version(&latest, Self::CURRENT_VERSION) {
                             this.update_available = true;
+                            log_info!(
+                                "update",
+                                "发现新版本 {latest}（当前 v{}）",
+                                Self::CURRENT_VERSION
+                            );
                             SharedString::from(
                                 t!("about.new_version", version = latest).into_owned(),
                             )
@@ -509,13 +535,16 @@ impl PureClash {
                         }
                     }
                     Ok(None) => tr("about.no_release"),
-                    Err(error) => SharedString::from(
-                        t!(
-                            "about.check_failed",
-                            error = concise_error(&format!("{error:#}"), 160)
+                    Err(error) => {
+                        log_warn!("update", "检查应用更新失败：{error:#}");
+                        SharedString::from(
+                            t!(
+                                "about.check_failed",
+                                error = concise_error(&format!("{error:#}"), 160)
+                            )
+                            .into_owned(),
                         )
-                        .into_owned(),
-                    ),
+                    }
                 });
                 cx.notify();
             });
@@ -552,6 +581,15 @@ impl PureClash {
                         let revision = short_revision(&info.revision);
                         let restart_required = this.core_active();
                         this.geodata_info = info;
+                        log_info!(
+                            "geodata",
+                            "Geo 数据已更新到 {revision}{}",
+                            if restart_required {
+                                "，重启内核生效"
+                            } else {
+                                ""
+                            }
+                        );
                         this.geodata_status = Some(SharedString::from(if restart_required {
                             t!("settings.geodata_updated_reloaded", revision = revision)
                                 .into_owned()
@@ -563,6 +601,7 @@ impl PureClash {
                         }
                     }
                     Err(error) => {
+                        log_error!("geodata", "更新 Geo 数据失败：{error:#}");
                         this.geodata_status = Some(SharedString::from(
                             t!(
                                 "settings.geodata_update_failed",
@@ -586,7 +625,7 @@ impl PureClash {
         if let Err(error) = self.config.save(&self.paths.config_file) {
             // 写入失败时恢复旧值，避免界面状态与磁盘配置不一致。
             self.config.theme = previous;
-            eprintln!("保存主题配置失败：{error:#}");
+            log_warn!("app", "保存主题配置失败：{error:#}");
             return;
         }
 
@@ -607,9 +646,15 @@ impl PureClash {
         match set_autostart(enabled) {
             Ok(()) => {
                 self.autostart_enabled = enabled;
+                log_info!(
+                    "autostart",
+                    "登录自启已{}",
+                    if enabled { "开启" } else { "关闭" }
+                );
                 self.integration_error = None;
             }
             Err(error) => {
+                log_error!("autostart", "设置登录自启失败：{error:#}");
                 self.integration_error = Some(
                     t!(
                         "app.autostart_failed",
@@ -639,7 +684,7 @@ impl PureClash {
             }
             Err(error) => {
                 // 短暂读取失败时保留上次状态，避免把已启用误画成关闭。
-                eprintln!("刷新登录自启状态失败：{error:#}");
+                log_warn!("autostart", "刷新登录自启状态失败：{error:#}");
             }
         }
     }
@@ -662,7 +707,7 @@ impl PureClash {
         if let Err(error) = self.config.save(&self.paths.config_file) {
             self.config.language = previous;
             rust_i18n::set_locale(previous.code());
-            eprintln!("保存语言配置失败：{error:#}");
+            log_warn!("app", "保存语言配置失败：{error:#}");
             return;
         }
 
@@ -676,12 +721,14 @@ impl PureClash {
 
     fn toggle_core(&mut self, cx: &mut Context<Self>) {
         if self.mihomo_running() {
+            log_info!("core", "用户请求停止内核");
             // 系统代理指向本机内核端口，停内核前先恢复用户原有代理设置。
             self.disable_system_proxy();
             self.stop_core();
             // TUN 由内核承载，内核停止即失效；同步回退避免界面与下次启动
             // 仍显示/启用已停止的 TUN。
             if let Err(error) = self.revert_tun(cx) {
+                log_error!("tun", "停止内核时回退 TUN 配置失败：{error:#}");
                 self.integration_error = Some(concise_error(&format!("{error:#}"), 180));
             }
         } else {
@@ -712,6 +759,13 @@ impl PureClash {
         // TUN 需要系统网络权限；UAC/polkit 弹窗即用户的显式授权。
         let elevated = self.tun_configured;
         let allow_interactive_elevation = self.interactive_elevation_allowed;
+        log_info!(
+            "core",
+            "发起内核启动（版本 {}{}，runtime {}）",
+            version,
+            if elevated { "，提权/TUN" } else { "" },
+            config_file.display()
+        );
 
         #[cfg(target_os = "windows")]
         {
@@ -781,6 +835,13 @@ impl PureClash {
         }
         match result {
             Ok(process) => {
+                let pid = process.pid();
+                log_info!(
+                    "core",
+                    "内核进程已创建（pid {}）",
+                    pid.map(|pid| pid.to_string())
+                        .unwrap_or_else(|| "未知".into())
+                );
                 self.mihomo_process = Some(process);
                 self.mihomo_error = None;
                 self.spawn_readiness_probe(generation, cx);
@@ -791,8 +852,13 @@ impl PureClash {
                 // 提权启动被拒绝（用户取消 UAC/polkit）或校验失败时，回退关闭 TUN
                 // 并以普通权限重新拉起内核，保证用户始终有可用代理。
                 if self.tun_configured {
+                    log_warn!(
+                        "tun",
+                        "TUN 内核启动失败，回退关闭 TUN 并重启普通内核：{error:#}"
+                    );
                     let fallback_message = tun_reverted_error(&error);
                     if let Err(revert_error) = self.revert_tun(cx) {
+                        log_error!("tun", "回退 TUN 配置失败：{revert_error:#}");
                         self.integration_error = Some(concise_error(
                             &format!("{fallback_message}；回退配置失败：{revert_error:#}"),
                             220,
@@ -805,8 +871,9 @@ impl PureClash {
                     return;
                 }
                 let detail = concise_error(&format!("{error:#}"), 240);
-                // 原始校验错误只展示给当前用户，不写入日志，避免泄露配置中的敏感内容。
-                eprintln!("启动 Mihomo 失败，详情已显示在应用界面");
+                // 失败详情写入日志前由日志层统一脱敏（URL 只留 host、token 掩码），
+                // 界面仍展示完整原因。
+                log_error!("core", "启动 Mihomo 失败：{error:#}");
                 self.mihomo_error = Some(t!("app.core_start_failed", error = detail).into_owned());
             }
         }
@@ -846,6 +913,7 @@ impl PureClash {
                 }
                 let Err(error) = result else {
                     // 只有 controller 明确返回开启，界面和托盘才显示 TUN 已生效。
+                    log_info!("tun", "controller 确认 TUN 已生效");
                     this.tun_effective = true;
                     cx.notify();
                     return;
@@ -854,11 +922,13 @@ impl PureClash {
                     return;
                 }
                 // 回退事务会校验并原子写入关闭 TUN 的配置，运行中自动重启内核。
+                log_warn!("tun", "controller 未确认 TUN 生效，自动回退关闭：{error:#}");
                 let message = tun_reverted_error(&error);
                 // 挂在 integration_error 上：内核重启成功的就绪探针会清掉 mihomo_error。
                 this.integration_error = Some(match this.revert_tun(cx) {
                     Ok(()) => message,
                     Err(revert_error) => {
+                        log_error!("tun", "回退 TUN 配置失败：{revert_error:#}");
                         concise_error(&format!("{message}；回退配置失败：{revert_error:#}"), 220)
                     }
                 });
@@ -895,6 +965,7 @@ impl PureClash {
                 }
                 match result {
                     Ok(()) => {
+                        log_info!("core", "controller 就绪，内核进入运行状态");
                         this.core_state = CoreState::Running;
                         this.mihomo_error = None;
                         this.fetch_runtime_state(cx);
@@ -902,6 +973,7 @@ impl PureClash {
                     }
                     Err(error) => {
                         // 内核未能就绪：先恢复代理设置再回收进程，避免流量断在死端口上。
+                        log_error!("core", "等待 Mihomo controller 就绪超时：{error:#}");
                         this.disable_system_proxy();
                         this.stop_core();
                         // TUN 开启时最常见的失败原因是缺少系统授权或平台 TUN 能力，
@@ -912,6 +984,7 @@ impl PureClash {
                             match this.revert_tun(cx) {
                                 Ok(()) => this.start_core(cx),
                                 Err(revert_error) => {
+                                    log_error!("tun", "TUN 回退配置失败：{revert_error:#}");
                                     fallback_error = Some(concise_error(
                                         &format!("TUN 回退配置失败：{revert_error:#}"),
                                         180,
@@ -972,9 +1045,18 @@ impl PureClash {
                         this.mode = ProxyMode::from_controller(config.mode);
                         this.groups = proxies.groups;
                         this.node_endpoints = endpoints;
+                        if this.runtime_state_failing {
+                            this.runtime_state_failing = false;
+                            log_info!("controller", "controller 运行配置请求恢复正常");
+                        }
                     }
                     Err(error) => {
-                        eprintln!("拉取 controller 状态失败：{error:#}");
+                        // 每秒轮询失败只做边沿记录：从成功转入失败记一条 warn，
+                        // 恢复时记一条 info，避免刷屏。
+                        if !this.runtime_state_failing {
+                            this.runtime_state_failing = true;
+                            log_warn!("controller", "拉取 controller 状态失败：{error:#}");
+                        }
                     }
                 }
                 cx.notify();
@@ -1010,8 +1092,14 @@ impl PureClash {
                     // 快照返回时内核可能刚被停止；保持清空状态即可。
                     if this.mihomo_running() {
                         match snapshot {
-                            Ok(data) => this.apply_connections(data),
-                            Err(_) => {
+                            Ok(data) => {
+                                if this.connections_failing {
+                                    this.connections_failing = false;
+                                    log_info!("controller", "controller 连接轮询恢复正常");
+                                }
+                                this.apply_connections(data);
+                            }
+                            Err(error) => {
                                 // controller 短暂不可达时只清零流量；若受管进程也已
                                 // 退出，则立即撤销所有依赖内核的真实运行状态。
                                 let process_running = this
@@ -1019,8 +1107,19 @@ impl PureClash {
                                     .as_mut()
                                     .is_some_and(MihomoProcess::is_running);
                                 if process_running {
+                                    if !this.connections_failing {
+                                        this.connections_failing = true;
+                                        log_warn!(
+                                            "controller",
+                                            "连接轮询失败（内核进程仍在运行）：{error:#}"
+                                        );
+                                    }
                                     this.clear_live_traffic();
                                 } else {
+                                    log_error!(
+                                        "core",
+                                        "受管内核进程意外退出，自动恢复系统代理并停止内核"
+                                    );
                                     this.disable_system_proxy();
                                     this.stop_core();
                                     this.integration_error =
@@ -1069,6 +1168,7 @@ impl PureClash {
                 .await;
             let _ = this.update(cx, |this, cx| {
                 if let Err(error) = result {
+                    log_warn!("controller", "关闭单个连接失败：{error:#}");
                     this.integration_error = Some(concise_error(&format!("{error:#}"), 160));
                 }
                 cx.notify();
@@ -1091,6 +1191,7 @@ impl PureClash {
                 .await;
             let _ = this.update(cx, |this, cx| {
                 if let Err(error) = result {
+                    log_warn!("controller", "关闭全部连接失败：{error:#}");
                     this.integration_error = Some(concise_error(&format!("{error:#}"), 160));
                 }
                 cx.notify();
@@ -1161,6 +1262,7 @@ impl PureClash {
                         }
                     }
                     Err(error) => {
+                        log_debug!("proxy", "分组延迟测试失败：{error:#}");
                         this.integration_error = Some(concise_error(&format!("{error:#}"), 160));
                     }
                 }
@@ -1248,6 +1350,7 @@ impl PureClash {
             cx.notify();
             return;
         }
+        log_info!("core", "重启内核以应用新配置");
         self.stop_core();
         self.start_core(cx);
         cx.notify();
@@ -1267,9 +1370,10 @@ impl PureClash {
         self.tun_effective = false;
         if let Some(Err(error)) = stop_result {
             let detail = concise_error(&format!("{error:#}"), 240);
-            eprintln!("停止 Mihomo 失败，详情已显示在应用界面");
+            log_error!("core", "停止 Mihomo 失败：{error:#}");
             self.mihomo_error = Some(t!("app.core_stop_failed", error = detail).into_owned());
         } else {
+            log_info!("core", "内核已停止");
             self.mihomo_error = None;
         }
 
@@ -1284,10 +1388,14 @@ impl PureClash {
         self.delay_testing.clear();
         self.node_delays.clear();
         self.node_delay_failures.clear();
+        // 新内核从健康状态重新开始统计，不能继承上一进程的失败边沿。
+        self.runtime_state_failing = false;
+        self.connections_failing = false;
     }
 
     /// 退出前的完整清理：恢复系统代理并回收内核；托盘退出专用。
     pub(crate) fn shutdown(&mut self) {
+        log_info!("app", "应用退出：恢复系统代理并停止内核");
         self.disable_system_proxy();
         self.stop_core();
     }
@@ -1306,12 +1414,14 @@ impl PureClash {
                 return;
             };
             let addr = format!("127.0.0.1:{}", baseline.mixed_port);
+            log_info!("proxy", "开启系统代理（{addr}）");
             match enable_system_proxy(&self.paths, &addr) {
                 Ok(()) => {
                     self.integration_error = None;
                     self.system_proxy = true;
                 }
                 Err(error) => {
+                    log_error!("proxy", "开启系统代理失败：{error:#}");
                     self.integration_error = Some(system_proxy_error(&error));
                 }
             }
@@ -1330,10 +1440,14 @@ impl PureClash {
         match restore_system_proxy(&snapshot) {
             Ok(()) => {
                 clear_system_proxy_state(&self.paths);
+                log_info!("proxy", "系统代理已关闭并恢复用户原有设置");
                 self.system_proxy = false;
                 self.integration_error = None;
             }
             Err(error) => {
+                // 恢复失败意味着用户系统设置可能残留 Pure Clash 代理地址，
+                // 必须完整留痕供排查。
+                log_error!("proxy", "恢复用户原有系统代理设置失败：{error:#}");
                 self.integration_error = Some(system_proxy_error(&error));
             }
         }
@@ -1358,20 +1472,28 @@ impl PureClash {
         }
         let enabled = !self.tun_configured;
         if enabled && !self.mihomo_running() {
+            log_warn!("tun", "拒绝开启 TUN：内核未运行");
             self.integration_error = Some(t!("app.tun_requires_core").into_owned());
             cx.notify();
             return;
         }
         let Some(_) = self.baseline.as_ref() else {
+            log_warn!("tun", "拒绝切换 TUN：本地基线不可用");
             self.integration_error = Some(t!("app.baseline_missing").into_owned());
             cx.notify();
             return;
         };
         if let Err(error) = self.apply_tun_configuration(enabled, cx) {
+            log_error!("tun", "TUN 配置事务失败：{error:#}");
             self.integration_error = Some(concise_error(&format!("{error:#}"), 160));
             cx.notify();
             return;
         }
+        log_info!(
+            "tun",
+            "TUN 配置已{}（内核重启后由 controller 确认真实生效）",
+            if enabled { "开启" } else { "关闭" }
+        );
         self.integration_error = None;
         cx.notify();
     }
@@ -1437,7 +1559,7 @@ impl PureClash {
                     this.fetch_runtime_state(cx);
                 }
                 Err(error) => {
-                    eprintln!("切换运行模式失败：{error:#}");
+                    log_warn!("proxy", "切换运行模式失败：{error:#}");
                 }
             });
         })
@@ -1467,11 +1589,17 @@ impl PureClash {
         cx.notify();
 
         cx.spawn(async move |this, cx| {
+            let log_group = group_name.clone();
+            let log_node = node_name.clone();
             let result = cx
                 .background_executor()
                 .spawn(async move { controller.select_proxy(&group_name, &node_name) })
                 .await;
-            if result.is_err() {
+            if let Err(error) = result {
+                log_warn!(
+                    "proxy",
+                    "选择节点失败（{log_group} → {log_node}）：{error:#}"
+                );
                 let _ = this.update(cx, |this, cx| this.fetch_runtime_state(cx));
             }
         })
@@ -1487,7 +1615,7 @@ impl PureClash {
         if let Err(error) = self.config.save(&self.paths.config_file) {
             self.config.profiles = previous;
             self.config.active_profile = previous_active;
-            eprintln!("保存配置列表失败：{error:#}");
+            log_error!("profile", "保存配置列表失败：{error:#}");
         }
     }
 
@@ -1532,6 +1660,7 @@ impl PureClash {
 
         cx.spawn(async move |this, cx| {
             let url_inner = url.clone();
+            let host = host_of_url(&url).to_owned();
             let result = cx
                 .background_executor()
                 .spawn(async move {
@@ -1546,6 +1675,7 @@ impl PureClash {
                 Ok((id, runtime)) => {
                     this.profile_busy = None;
                     this.profile_form_open = false;
+                    log_info!("profile", "订阅已下载并保存（{name}，{host}）");
                     let mut meta = profile::subscription_meta(name, url);
                     // 文件已按后台任务生成的 id 落盘，元数据必须使用同一 id。
                     meta.id = id;
@@ -1556,6 +1686,7 @@ impl PureClash {
                 }
                 Err(error) => {
                     this.profile_busy = None;
+                    log_error!("profile", "下载订阅失败（{host}）：{error:#}");
                     this.profile_error = Some(concise_error(&format!("{error:#}"), 200));
                     cx.notify();
                 }
@@ -1654,6 +1785,7 @@ impl PureClash {
                 Ok((id, runtime)) => {
                     this.profile_busy = None;
                     this.profile_form_open = false;
+                    log_info!("profile", "本地配置已导入并保存（{name}）");
                     let mut meta = profile::local_meta(name);
                     // 文件已按后台任务生成的 id 落盘，元数据必须使用同一 id。
                     meta.id = id;
@@ -1664,6 +1796,7 @@ impl PureClash {
                 }
                 Err(error) => {
                     this.profile_busy = None;
+                    log_error!("profile", "导入本地配置失败：{error:#}");
                     this.profile_error = Some(
                         t!(
                             "profiles.import_failed",
@@ -1698,6 +1831,7 @@ impl PureClash {
 
         cx.spawn(async move |this, cx| {
             let id_inner = id.clone();
+            let host = host_of_url(&url).to_owned();
             let result = cx
                 .background_executor()
                 .spawn(async move {
@@ -1711,6 +1845,12 @@ impl PureClash {
             let _ = this.update(cx, |this, cx| match result {
                 Ok(runtime) => {
                     this.profile_busy = None;
+                    let name = this
+                        .profiles
+                        .get(index)
+                        .map(|meta| meta.name.clone())
+                        .unwrap_or_default();
+                    log_info!("profile", "订阅已更新（{name}，{host}）");
                     if let Some(meta) = this.profiles.get_mut(index) {
                         meta.updated_at = profile::now_secs();
                     }
@@ -1718,12 +1858,14 @@ impl PureClash {
                     if this.active_profile.as_deref() == Some(id.as_str())
                         && let Err(error) = this.apply_runtime(&runtime, cx)
                     {
+                        log_error!("profile", "应用更新后的运行时配置失败：{error:#}");
                         this.profile_error = Some(concise_error(&format!("{error:#}"), 200));
                     }
                     cx.notify();
                 }
                 Err(error) => {
                     this.profile_busy = None;
+                    log_error!("profile", "更新订阅失败（{host}）：{error:#}");
                     this.profile_error = Some(concise_error(&format!("{error:#}"), 200));
                     cx.notify();
                 }
@@ -1741,6 +1883,7 @@ impl PureClash {
             return;
         };
         let id = meta.id.clone();
+        let name = meta.name.clone();
         let was_active = self.active_profile.as_deref() == Some(id.as_str());
         let previous_content = if was_active {
             match profile::read_profile(&self.paths, &id) {
@@ -1798,6 +1941,15 @@ impl PureClash {
             return;
         }
         self.profiles.remove(index);
+        log_info!(
+            "profile",
+            "已删除配置 {name}{}",
+            if was_active {
+                "（激活中，已切回默认配置）"
+            } else {
+                ""
+            }
+        );
         if was_active {
             self.active_profile = None;
             if self.core_active() {
@@ -1821,6 +1973,7 @@ impl PureClash {
             return;
         }
         let id = meta.id.clone();
+        let name = meta.name.clone();
         let version = self.config.mihomo_version.clone();
         let paths = self.paths.clone();
         self.profile_busy = Some(t!("profiles.busy_activating").into_owned());
@@ -1844,10 +1997,12 @@ impl PureClash {
                     this.profile_busy = None;
                     match this.apply_runtime(&runtime, cx) {
                         Ok(()) => {
+                            log_info!("profile", "已激活配置 {name}");
                             this.active_profile = Some(id);
                             this.save_profiles();
                         }
                         Err(error) => {
+                            log_error!("profile", "激活配置 {name} 时写入 runtime 失败：{error:#}");
                             this.profile_error = Some(concise_error(&format!("{error:#}"), 200));
                             cx.notify();
                         }
@@ -1855,6 +2010,7 @@ impl PureClash {
                 }
                 Err(error) => {
                     this.profile_busy = None;
+                    log_error!("profile", "激活配置 {name} 前的校验失败：{error:#}");
                     this.profile_error = Some(concise_error(&format!("{error:#}"), 200));
                     cx.notify();
                 }
@@ -1893,11 +2049,13 @@ impl PureClash {
                     this.profile_busy = None;
                     match this.apply_runtime(&runtime, cx) {
                         Ok(()) => {
+                            log_info!("profile", "已切回内置默认配置");
                             // active_profile 记为空即代表默认配置，下次启动同样生效。
                             this.active_profile = None;
                             this.save_profiles();
                         }
                         Err(error) => {
+                            log_error!("profile", "切回默认配置时写入 runtime 失败：{error:#}");
                             this.profile_error = Some(concise_error(&format!("{error:#}"), 200));
                             cx.notify();
                         }
@@ -1905,6 +2063,7 @@ impl PureClash {
                 }
                 Err(error) => {
                     this.profile_busy = None;
+                    log_error!("profile", "切回默认配置前的校验失败：{error:#}");
                     this.profile_error = Some(concise_error(&format!("{error:#}"), 200));
                     cx.notify();
                 }
@@ -1936,10 +2095,12 @@ impl PureClash {
         if let Some(id) = id {
             match self.apply_runtime(&runtime_yaml, cx) {
                 Ok(()) => {
+                    log_info!("profile", "新配置已激活并按需重启内核");
                     self.active_profile = Some(id);
                     self.save_profiles();
                 }
                 Err(error) => {
+                    log_error!("profile", "应用新配置的运行时写入失败：{error:#}");
                     self.profile_error = Some(concise_error(&format!("{error:#}"), 200));
                     cx.notify();
                 }
@@ -1978,6 +2139,16 @@ fn system_proxy_state_file(paths: &AppPaths) -> std::path::PathBuf {
     paths.data_dir.join("system-proxy.json")
 }
 
+/// 订阅日志只保留 host（含可选端口），userinfo 与完整 URL 均不进入日志。
+fn host_of_url(url: &str) -> &str {
+    let rest = url.split_once("://").map(|(_, rest)| rest).unwrap_or(url);
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or(rest);
+    authority
+        .rsplit_once('@')
+        .map(|(_, host)| host)
+        .unwrap_or(authority)
+}
+
 fn save_system_proxy_state(paths: &AppPaths, snapshot: &SystemProxySnapshot) -> anyhow::Result<()> {
     std::fs::create_dir_all(&paths.data_dir)?;
     let bytes = serde_json::to_vec_pretty(snapshot)?;
@@ -1999,14 +2170,23 @@ fn clear_system_proxy_state(paths: &AppPaths) {
 
 /// 启用系统代理，捕获并返回托管前的用户设置快照。
 fn enable_system_proxy(paths: &AppPaths, server: &str) -> anyhow::Result<()> {
-    let snapshot = capture_system_proxy()?;
+    let snapshot = capture_system_proxy().inspect_err(|error| {
+        log_error!("proxy", "捕获用户既有系统代理设置失败：{error:#}");
+    })?;
     // 状态必须先于系统设置落盘；应用在 set_system_proxy 后崩溃时，下次启动
     // 仍能恢复用户原配置。
-    save_system_proxy_state(paths, &snapshot)?;
+    save_system_proxy_state(paths, &snapshot).inspect_err(|error| {
+        log_error!("proxy", "系统代理托管状态文件落盘失败：{error:#}");
+    })?;
     if let Err(apply_error) = set_system_proxy(server) {
+        log_error!("proxy", "写入系统代理设置失败：{apply_error:#}");
         match restore_system_proxy(&snapshot) {
             Ok(()) => clear_system_proxy_state(paths),
             Err(restore_error) => {
+                log_error!(
+                    "proxy",
+                    "写入失败后自动恢复原系统代理也失败：{restore_error:#}"
+                );
                 return Err(anyhow::anyhow!(
                     "{apply_error:#}；自动恢复原系统代理也失败：{restore_error:#}"
                 ));
@@ -2299,6 +2479,15 @@ mod tests {
     fn concise_error_preserves_utf8_boundaries() {
         assert_eq!(concise_error("启动失败", 2), "启动…");
         assert_eq!(concise_error("short", 10), "short");
+    }
+
+    #[test]
+    fn subscription_log_host_drops_userinfo_and_path() {
+        assert_eq!(
+            host_of_url("https://user:password@example.com:8443/sub?token=secret"),
+            "example.com:8443"
+        );
+        assert_eq!(host_of_url("https://[::1]:9090/sub"), "[::1]:9090");
     }
 
     #[test]

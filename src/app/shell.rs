@@ -77,6 +77,7 @@ impl AppShell {
         #[cfg(any(target_os = "windows", target_os = "linux"))]
         if !show_window && !tray_ready {
             // 零窗口模式若没有托盘将无法恢复或退出，立即清理业务资源并结束进程。
+            log_error!("tray", "后台模式托盘初始化失败，清理内核并退出");
             self.request_quit(cx);
         }
     }
@@ -119,7 +120,7 @@ impl AppShell {
                     .runtime
                     .update(cx, |runtime, _| runtime.allow_interactive_elevation());
             }
-            Err(error) => eprintln!("无法创建 Pure Clash 主窗口：{error:#}"),
+            Err(error) => log_error!("app", "无法创建 Pure Clash 主窗口：{error:#}"),
         }
     }
 
@@ -144,7 +145,7 @@ impl AppShell {
         let (system_tray, actions) = match SystemTray::new() {
             Ok(result) => result,
             Err(error) => {
-                eprintln!("初始化系统托盘失败：{error:#}");
+                log_error!("tray", "初始化系统托盘失败：{error:#}");
                 return false;
             }
         };
@@ -154,8 +155,14 @@ impl AppShell {
         cx.spawn(async move |this, cx| {
             while let Ok(action) = actions.recv().await {
                 let result = this.update(cx, |this, cx| match action {
-                    TrayAction::OpenMainWindow => this.open_or_focus_main_window(cx),
-                    TrayAction::Quit => this.request_quit(cx),
+                    TrayAction::OpenMainWindow => {
+                        log_debug!("tray", "托盘请求打开主窗口");
+                        this.open_or_focus_main_window(cx)
+                    }
+                    TrayAction::Quit => {
+                        log_info!("tray", "托盘请求退出应用");
+                        this.request_quit(cx)
+                    }
                 });
                 if result.is_err() || action == TrayAction::Quit {
                     break;
@@ -172,7 +179,7 @@ impl AppShell {
         if let Some(system_tray) = &self.system_tray {
             let texts = self.runtime.read(cx).tray_texts();
             if let Err(error) = system_tray.set_tooltip(&texts.tooltip) {
-                eprintln!("更新托盘状态失败：{error:#}");
+                log_warn!("tray", "更新托盘状态失败：{error:#}");
             }
             system_tray.set_menu_texts(&texts.open, &texts.quit);
         }

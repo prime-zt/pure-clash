@@ -103,7 +103,7 @@ fn accept_loop(listener: UnixListener, shutdown: Arc<AtomicBool>, activation_sen
                 continue;
             }
             Err(error) => {
-                eprintln!("单实例监听结束：{error}");
+                log_warn!("app", "单实例监听结束：{error}");
                 break;
             }
         }

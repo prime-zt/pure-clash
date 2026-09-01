@@ -7,6 +7,9 @@
 rust_i18n::i18n!("locales", fallback = "zh-CN");
 
 // Windows 发布构建不附带控制台，debug 构建则保留终端以便查看启动错误。
+// 日志宏经 #[macro_use] 提供给后续声明的所有模块使用。
+#[macro_use]
+mod logging;
 mod app;
 mod assets;
 mod config;
@@ -56,8 +59,17 @@ fn main() {
             SingleInstanceState::Secondary => return,
         };
 
+    // 运行日志在单实例判定之后、配置加载之前初始化：启动期的配置、基线与
+    // 内核失败都能落盘；次实例不写日志、静默退出，唤起事件由首实例记录。
+    if let Ok(paths) = platform::AppPaths::from_current_exe() {
+        logging::init(&paths.log_dir);
+    }
+
     // 平台模块统一解析配置和资源路径，避免依赖可能被快捷方式改变的工作目录。
-    let loaded_config = config::load_or_create().expect("无法初始化 Pure Clash 配置");
+    let loaded_config = config::load_or_create().unwrap_or_else(|error| {
+        log_error!("app", "初始化 Pure Clash 配置失败：{error:#}");
+        panic!("无法初始化 Pure Clash 配置：{error:#}");
+    });
     rust_i18n::set_locale(loaded_config.config.language.code());
 
     let application = application()
@@ -93,6 +105,7 @@ fn install_single_instance_listener(
 ) {
     cx.spawn(async move |cx| {
         while activation_requests.recv().await.is_ok() {
+            log_info!("app", "收到第二实例唤起请求，恢复主窗口");
             // AppShell 由 GPUI 全局状态持有，零窗口期间也能接收第二实例的唤起请求。
             cx.update(AppShell::open_global);
         }

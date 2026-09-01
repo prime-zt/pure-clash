@@ -1,6 +1,6 @@
 [package]
 name = "pure-clash"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2024"
 description = "A lightweight Mihomo desktop client built with Rust and Zed GPUI"
 license = "GPL-3.0"
@@ -76,6 +76,8 @@ gpui_platform = {
     # 运行时按当前会话选择，Wayland 不可用时仍可回退 X11。
     features = ["wayland", "x11"]
 }
+# 日志时间戳：本地时区格式化，与 Mihomo logrus 输出、journalctl 展示一致。
+jiff = "0.2"
 rust-i18n = "4.2.1"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

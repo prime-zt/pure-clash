@@ -24,8 +24,9 @@
 - `src/platform/linux/tray.rs`：Linux 托盘，基于 ksni（SNI/DBus 纯 Rust 实现）提供图标、菜单和状态文本，与 Windows 行为对齐。
 - `src/platform/linux/window_ctrl.rs`：Linux 主窗口重建后的显示与激活，衔接 Wayland/X11 差异。
 - `src/platform/windows/window_ctrl.rs`：Windows 主窗口重建后的显示与激活，支撑托盘唤起。
-- `src/mihomo/process.rs`：使用 `-t` 校验默认配置，按 `-d` / `-f` 启停真实内核并回收子进程；平台进程管理全部委托 `platform::KernelProcessGuard`，模块内不含平台分支。
+- `src/mihomo/process.rs`：使用 `-t` 校验默认配置，按 `-d` / `-f` 启停真实内核并回收子进程；平台进程管理全部委托 `platform::KernelProcessGuard`，模块内不含平台分支；普通内核的 stdout/stderr 经泵线程逐行写入 kernel.log（打不开日志也持续排空管道）。
 - `config/mihomo/default.yaml`：嵌入程序的首次启动默认配置，仅包含一个内置 `DIRECT` 节点。
+- `src/logging.rs`：零框架文件日志（`jiff` 仅提供本地时区时间戳）。运行日志 app.log 与内核日志 kernel.log 分文件、各自按大小轮转为 `.1`（1MB+3MB 单文件上限，磁盘合计约 8MB）；宏 `log_error!`/`log_warn!`/`log_info!`/`log_debug!` 以标签区分模块，所有消息写入前经 `redact` 脱敏；panic hook 记录 panic；初始化失败降级为空日志绝不阻断启动。
 - `src/profile.rs`：URL 订阅和本地配置文件的读取、大小/编码限制、结构校验、落盘与运行时配置同步管线。
 - `src/mihomo/config.rs`：客户端本地基线（端口/controller/secret）、订阅合并与结构预检。
 - `src/mihomo/controller.rs`：external controller REST 客户端（版本/模式/代理组）与订阅下载。
@@ -43,7 +44,7 @@
 ## 技术栈、目录与约定
 
 - Rust 2024 edition；GPUI 使用 Zed `v1.17.2` 对应提交 `c8e44cfa7bda9b2e22c8d6934d78969352e7f61a`，平台后端使用同提交的 `gpui_platform`；`rust-i18n = 4.2.1`；Windows 托盘使用 `tray-icon = 0.24.2`；unix 目标使用 `libc` 发送 SIGTERM 与设置父进程死亡信号；非 Windows 目标使用 `directories = 6.0` 解析标准用户目录。
-- 当前 Cargo 包版本为 `0.2.1`；正式发布标签必须使用匹配的 `v0.2.1`，否则发布流水线会拒绝构建。
+- 当前 Cargo 包版本为 `0.2.2`；正式发布标签必须使用匹配的 `v0.2.2`，否则发布流水线会拒绝构建。
 - UI、业务说明和代码注释使用中文；协议字段、类型名和函数名保留英文。
 - Cargo/可执行文件/安装包前缀统一为 `pure-clash`，界面和 Windows 发行名统一为 `Pure Clash`。
 - 保持单包、小依赖；平台无关路径留在 `src/platform/mod.rs`，只有实际接入系统代理、凭据、进程监管等能力时才新增 `src/platform/windows/`、`linux/` 或 `macos/` 子模块。
@@ -62,6 +63,7 @@
 
 - Mihomo 作为独立 sidecar 运行；Pure Clash 通过仅监听 loopback 的 REST/WebSocket external controller 通信，并为每次安装生成高强度随机 secret。
 - 客户端只接受本机 controller，不开放局域网控制；日志与诊断信息必须脱敏，不记录订阅 URL、认证头或 controller secret。
+- 日志分两个文件：`log/app.log` 记录客户端运行日志，`log/kernel.log` 记录普通内核的 stdout/stderr 原始输出；Windows 日志目录在可执行文件同级 `log/`，Linux 按 XDG 放 `~/.local/state/pure-clash/log/`（`AppPaths.log_dir` 统一解析，macOS 回退本地数据目录）。单文件超阈值（app 1MB、kernel 3MB）轮转为 `.1` 覆盖旧备份，磁盘占用合计约 8MB；打开文件时总是先把上一段归档，app.log 即本次会话、kernel.log 即当前内核的输出。日志在单实例判定后、配置加载前初始化，次实例不写日志；初始化失败降级为空日志，绝不阻断启动；panic hook 把 panic 落盘。所有消息（含内核行与 `-t` 校验失败详情）写入前经 `redact` 统一脱敏：URL 只保留 scheme+host（内嵌凭据与路径/查询丢弃），`secret=`/`token=`/`password=`/`authorization:` 的值掩码。插桩遵循单层记录（app 层记用户可见操作与结果，platform/mihomo 层只记内部细节）与边沿触发（运行配置和连接两条 controller 请求各自只在转坏/恢复时记一条）；日志宏标签统一用 app/core/kernel/proxy/tun/profile/tray/controller/geodata/autostart/update/panic。提权内核（Windows UAC / Linux systemd 服务）的 stdout 不经客户端捕获：app.log 记录生命周期与失败原因，Windows 提权内核输出不落 kernel.log，Linux TUN 内核输出在 systemd journal。
 - 启动真实内核前先用目标版本的 Mihomo 校验配置；校验失败不得替换当前可用配置或重启正在工作的内核。
 - 内核子进程的平台守护与终止统一经 `platform::KernelProcessGuard`（`new`/`prepare_command`/`attach`/`terminate`/Drop 约定）：Windows 用 Job Object 与 TerminateProcess，Linux 用 pdeathsig 与 SIGTERM→5 秒→SIGKILL，unix 内核独立成进程组。Windows 的 UAC `ShellExecuteExW(runas)` 必须在专用 STA 线程执行，禁止在 GPUI 实体更新回调中同步弹 UAC，以免 Shell 嵌套消息循环重入 `App`；启动结果带代次回传，过期进程必须立即回收。Linux 启动必须保持在长寿命线程（当前为 GPUI 主线程），避免创建子进程的短寿命线程退出触发 pdeathsig。macOS 仅预留进程组隔离与优雅终止，异常退出兑底在正式支持前单独实现。`mihomo` 模块不得直接依赖平台 API。
 - 系统代理和 TUN 是两条独立能力。系统代理由客户端实现：Windows 写 HKCU Internet Settings 并经 InternetSetOption 立即生效；Linux GNOME/Cinnamon 兼容会话通过 `gsettings` 管理 HTTP/HTTPS/FTP/SOCKS，其他桌面明确返回不支持；macOS 暂不支持。启用前捕获用户既有设置存入 `data/system-proxy.json`，关闭时恢复，异常退出后下次启动按该文件自愈；状态文件必须先原子落盘再改系统设置，修改失败需自动恢复；停内核（手动停止/退出/内核失联）时自动恢复代理设置，配置切换重启内核不中断托管。TUN 由内核实现：开关写入本地基线 `tun_enable` 并重新合并 `-t` 校验、运行中自动重启内核；内核未运行时拒绝开启，手动停止内核时 TUN 经 `revert_tun` 同步回退（状态、基线与 runtime 一起关闭并持久化），配置切换重启与托盘退出不改变 TUN 基线（下次启动如实恢复）。Windows 经 `runas`（UAC 弹窗）以管理员权限启动 Mihomo。Linux 首次经 `pkexec` 安装 root 所有的 systemd 服务与锁定内核副本，后续通过按 UID 隔离且校验 `SO_PEERCRED` 的 Unix socket 启停，不再重复授权；对齐 Clash Verge Rev 的服务模型，服务保持 root 直接启动 Mihomo，不降权、不设置 ambient capabilities、不替换系统网络工具。GUI 不向服务传内核路径，只提交 runtime bundle（YAML + 本地资源 + 远程 provider 列表）；服务原子物化到 `/var/lib/pure-clash-service/users/<uid>/runtime`，拒绝未开启 TUN、非回环监听或资源路径越界的 bundle，先以锁定内核 `-t` 校验再启动，GUI PID 消失时自动回收内核。拒绝授权或启动失败即回退关闭 TUN 并以普通权限重启；内核就绪后仅经 controller `/configs` 核对 TUN 真实生效状态，不做外部公网探测，未生效即自动回退关闭、重启内核并在概览/设置页提示原因。Windows 的 wintun.dll 随包捆绑在内核版本目录（manifest `targets.windows-amd64.wintun` 记录版本、官方来源与双重 SHA-256，build.rs 校验存在性，NSIS 随内核一起安装/卸载）。Linux TUN 配置对齐同机 Clash Verge Rev 的已验证结构：使用 `gvisor`、`auto-route`、`dns-hijack: any:53`、Mihomo 默认设备/地址和完整双栈 fake-IP DNS；关闭 TUN 时 `ipv6` 回到 false、不注入 DNS，保留订阅自带配置。检测到其他客户端的 `Meta` TUN 设备时拒绝并行启动。

@@ -21,6 +21,11 @@ impl ElevatedProcess {
         self.pid as isize
     }
 
+    /// 服务端启动的内核进程 ID；供运行日志记录。
+    pub(crate) fn pid(&self) -> u32 {
+        self.pid
+    }
+
     /// 通过 root 服务查询已启动内核是否仍存活；查询不会改变客户端句柄状态。
     pub(crate) fn is_running(&self) -> bool {
         tun_service::is_core_running(self.pid)
