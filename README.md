@@ -1,87 +1,87 @@
 <div align="center">
-  <img src="assets/icons/app.svg" width="88" alt="Pure Clash icon" />
+  <img src="assets/icons/app.svg" width="88" alt="Pure Clash 应用图标" />
   <h1>Pure Clash</h1>
-  <p>A lightweight native Mihomo desktop client built with Rust and Zed GPUI</p>
-  <p><a href="./README.md">English</a> · <a href="./README.zh-CN.md">简体中文</a></p>
+  <p>使用 Rust 和 Zed GPUI 构建的轻量原生 Mihomo 桌面客户端</p>
+  <p><a href="./README.md">简体中文</a> · <a href="./README.en-US.md">English</a></p>
 </div>
 
-Pure Clash manages configuration subscriptions, proxy groups, connections and live traffic through a clean, fast native interface, and safely controls a standalone [Mihomo](https://github.com/MetaCubeX/mihomo) kernel — it does not reimplement proxy protocols or the rule engine in Rust.
+Pure Clash 用清晰、快速的原生界面管理配置订阅、代理组、连接与实时流量，并安全地控制独立运行的 [Mihomo](https://github.com/MetaCubeX/mihomo) 内核——不在 Rust 中重写代理协议栈或规则引擎。
 
-Currently available for Windows x64 and Linux x64 (Wayland / X11); macOS keeps directory and resource boundaries reserved but is not yet implemented.
+当前支持 Windows x64 与 Linux x64（Wayland / X11）；macOS 预留了目录与资源边界，尚未实现。
 
-## Preview
+## 预览
 
-| Light theme | Dark theme |
+| 浅色主题 | 深色主题 |
 | --- | --- |
-| ![Overview in light theme](docs/images/overview-light.png) | ![Overview in dark theme](docs/images/overview-dark.png) |
+| ![浅色主题概览](docs/images/overview-light.png) | ![深色主题概览](docs/images/overview-dark.png) |
 
-## Features
+## 功能特性
 
-- **Kernel lifecycle** — configuration is validated with the same kernel build via `-t` before launch; child processes are guarded by a Job Object (Windows) or `PR_SET_PDEATHSIG` (Linux) so the kernel is reaped when the main process dies; manual start/stop plus full cleanup on tray quit
-- **Profiles and subscriptions** — a built-in default profile (DIRECT-only), URL subscriptions, and local YAML imports through the native file picker; every source passes structural pre-check and kernel `-t` validation before atomic storage and activation
-- **Offline Geo databases** — `GeoSite.dat`, `GeoIP.dat`, and `Country.mmdb` ship with every package, are restored locally without network access, and can be updated explicitly from Settings
-- **Proxy groups and latency tests** — subscription nodes rendered per group, rule/global/direct mode switched live through the controller; per-node and per-group delay tests with threshold-based coloring
-- **Connections and live traffic** — a per-second controller snapshot poll showing process, target, chain, rule and per-connection up/down bytes; close a single connection or all of them; the overview shows live speed and active connections
-- **System proxy** — Windows writes the current user's Internet Settings and broadcasts via WinINet; Linux supports GNOME/Cinnamon sessions through `gsettings`. The user's original settings are saved atomically before enabling and restored on disable, core stop or crash recovery
-- **TUN mode** — Windows elevates only the kernel via UAC and uses the bundled wintun; Linux follows the Clash Verge Rev service model: a one-time `pkexec` installs a root systemd service, afterwards start/stop goes through a UID-restricted IPC and never asks for the password again; TUN automatically reverts when it does not take effect
-- **Desktop integration** — tray icon with live multi-language status, single-instance lock, close-to-tray, dark/light themes and a Chinese/English interface
-- **Minimal memory footprint** — the desktop client itself typically stays under 50 MB of memory (excluding the Mihomo kernel)
+- **内核生命周期**：启动前先用同版本内核执行 `-t` 校验配置；子进程由 Job Object（Windows）或 `PR_SET_PDEATHSIG`（Linux）守护，主进程异常退出时内核同步回收；支持手动启停与托盘退出前的完整清理
+- **配置与订阅**：内置默认配置（仅 `DIRECT` 出站）、URL 订阅与原生文件选择器导入本地 YAML；所有来源均经结构预检和内核 `-t` 校验后原子保存并激活
+- **离线 Geo 数据**：每个安装包内置 `GeoSite.dat`、`GeoIP.dat` 与 `Country.mmdb`，无需联网即可恢复，并可在设置页显式更新
+- **代理组与延迟测试**：分组展示订阅节点，规则/全局/直连三种运行模式经 controller 实时切换；支持单节点与整组延迟测试，结果按阈值分色
+- **连接与实时流量**：每秒轮询 controller 连接快照，展示进程、目标、链路、规则与上下行流量，支持单条或全部关闭；概览页实时显示网速与活动连接数
+- **系统代理**：Windows 写入当前用户 Internet Settings 并经 WinINet 广播生效；Linux 支持 GNOME/Cinnamon 会话（`gsettings`）。开启前原子保存用户原设置，关闭、停内核或异常退出后自动还原
+- **TUN 模式**：Windows 经 UAC 提权内核并使用随包 wintun；Linux 参考 Clash Verge Rev 服务模型，首次 `pkexec` 安装 root systemd 服务，此后按 UID 隔离 IPC 启停不再重复授权；TUN 未真实生效时自动回退并提示原因
+- **系统集成**：托盘图标（状态多语言同步）、单实例锁、关闭到托盘、深浅色主题与中英文界面
+- **极低内存占用**：桌面客户端自身内存通常在 50 MB 以内（不含 Mihomo 内核）
 
-## Pages
+## 界面
 
-Five primary pages plus an About page: Overview (stat cards, current outbound, runtime status, recent connections), Proxies (groups, node selection, delay tests), Connections (live list), Profiles (subscription management), Settings (kernel and system integration, language and theme). The titlebar carries pills mirroring the system proxy and TUN switches.
+五个基础页面加关于页：概览（统计卡、当前出站、运行状态、最近连接）、代理（分组与节点选择、测速）、连接（实时连接列表）、配置（订阅管理）、设置（内核与系统集成、语言主题）。标题栏以徽标同步展示系统代理与 TUN 开关状态。
 
-## Platform support
+## 平台支持
 
-| Capability | Windows x64 | Linux x64 | macOS |
+| 能力 | Windows x64 | Linux x64 | macOS |
 | --- | --- | --- | --- |
-| Kernel start/stop and guarding | ✅ | ✅ | Reserved |
-| Profiles and proxy control | ✅ | ✅ | Reserved |
-| Connections and live traffic | ✅ | ✅ | Reserved |
-| System proxy | ✅ | ✅ GNOME/Cinnamon | Not implemented |
-| TUN mode | ✅ UAC + wintun | ✅ polkit + root service | Not implemented |
-| Tray | ✅ | ✅ SNI (AppIndicator extension needed on GNOME) | Not implemented |
-| Single instance | ✅ | ✅ | Not implemented |
-| Installer | ✅ NSIS per-user | ✅ deb / rpm / AppImage | Not implemented |
+| 内核启停与守护 | ✅ | ✅ | 预留 |
+| 配置订阅与代理控制 | ✅ | ✅ | 预留 |
+| 连接与实时流量 | ✅ | ✅ | 预留 |
+| 系统代理 | ✅ | ✅ GNOME/Cinnamon | 未实现 |
+| TUN 模式 | ✅ UAC + wintun | ✅ polkit + root 服务 | 未实现 |
+| 托盘 | ✅ | ✅ SNI（GNOME 需 AppIndicator 扩展） | 未实现 |
+| 单实例锁 | ✅ | ✅ | 未实现 |
+| 安装器 | ✅ NSIS per-user | ✅ deb / rpm / AppImage | 未实现 |
 
-Linux uses XDG directories (`~/.config/pure-clash`, `~/.local/share/pure-clash`); Wayland gets client-side decorations with rounded corners, shadow and resize edges, and X11 falls back to system decorations.
+Linux 使用 XDG 标准目录（`~/.config/pure-clash`、`~/.local/share/pure-clash`）；Wayland 使用带圆角、阴影与缩放边缘的客户端装饰，X11 回退系统装饰。
 
-## Tested environments
+## 测试覆盖
 
-Real-world verification so far covers only the two setups below; other Windows versions, distros and desktop environments are untested, and feedback is welcome:
+目前只在以下两个环境完成过实际验证，其他 Windows 版本、发行版与桌面环境未经测试，欢迎反馈：
 
-- Windows 11 x64 (MSVC build)
-- Fedora 44 x64 (Wayland / GNOME)
+- Windows 11 x64（MSVC 构建）
+- Fedora 44 x64（Wayland / GNOME）
 
-## Getting started
+## 快速开始
 
-### Requirements
+### 环境要求
 
-- Windows 10/11 x64: Rust stable + MSVC toolchain
-- Linux x64: Rust stable (Wayland/X11 session; TUN needs `pkexec` and a polkit authentication agent)
-- PowerShell 7 + NSIS 3.x (only for building the Windows installer)
+- Windows 10/11 x64：Rust stable + MSVC 工具链
+- Linux x64：Rust stable（Wayland/X11 会话；TUN 需要 `pkexec` 与可用的 polkit 认证代理）
+- PowerShell 7 + NSIS 3.x（仅构建 Windows 安装包时需要）
 
-### Build and run
+### 构建运行
 
 ```bash
 cargo run
 ```
 
-The pinned kernel is committed with the source (`kernel/<version>/pc-mihomo.exe` on Windows, `kernel/<version>/pc-mihomo` on Linux), so a fresh clone can launch the real kernel right away. macOS binaries are not committed; download the release listed in `kernel/<version>/manifest.json` under `targets.macos-*` and verify its SHA-256.
+随包内核与源码一起提交（Windows 为 `kernel/<版本>/pc-mihomo.exe`，Linux 为 `kernel/<版本>/pc-mihomo`），clone 后即可启动真实内核。macOS 二进制暂不入库，需按 `kernel/<版本>/manifest.json` 的 `targets.macos-*` 条目手动下载并校验 SHA-256。
 
-On first launch the app initializes `config/` and `data/` on the current platform, including a DIRECT-only default config, a randomly generated controller secret, and an offline-verified copy of the bundled Geo databases.
+首次启动会在对应平台目录初始化 `config/` 与 `data/`，包括只含 `DIRECT` 节点的默认配置、随机生成的 controller secret，以及经过离线完整性校验的随包 Geo 数据副本。
 
-### Packages and releases
+### 安装包与发布
 
 ```powershell
 pwsh -NoLogo -NoProfile -File .\packaging\windows\build-installer.ps1
 ```
 
-The output is `dist\pure-clash-<version>-windows-x64-setup.exe`, a per-user installation into `%LOCALAPPDATA%\Programs\Pure Clash` that never asks for administrator rights.
+产物为 `dist\pure-clash-<版本>-windows-x64-setup.exe`，per-user 安装到 `%LOCALAPPDATA%\Programs\Pure Clash`，不请求管理员权限。
 
-Linux deb / rpm / AppImage and the Windows NSIS installer are built automatically by GitHub Actions when a `v*` tag is pushed, then published to [Releases](https://github.com/prime-zt/pure-clash/releases); the tag version must match the Cargo package version. deb/rpm install into `/opt/pure-clash` and create a `/usr/bin/pure-clash` symlink, the AppImage runs as-is, and every package bundles the kernel, Geo databases, manifests, and license files.
+Linux 提供 deb / rpm / AppImage，Windows 提供 NSIS 安装包：推送 `v*` 标签时由 GitHub Actions 自动构建并发布到 [Releases](https://github.com/prime-zt/pure-clash/releases)，标签版本必须与 Cargo 包版本一致。deb/rpm 安装到 `/opt/pure-clash` 并创建 `/usr/bin/pure-clash` 软链，AppImage 开箱即用，所有发行包均携带内核、Geo 数据、清单与许可证文件。
 
-### Development checks
+### 开发验证
 
 ```bash
 cargo fmt --check
@@ -90,45 +90,45 @@ cargo test
 cargo build --release
 ```
 
-GPUI is still pre-1.0; this project pins `0.2.2`. Verify the target version's official examples and changelog before upgrading.
+GPUI 仍处于 pre-1.0 阶段，本项目固定使用 `0.2.2`；升级前需核对对应版本的官方示例和变更记录。
 
-## Kernel supply chain
+## 内核供应链
 
-The bundled Mihomo kernel is version-pinned: `kernel/<version>/manifest.json` records the version, license and source URL, while `targets` keeps the download URL, size and SHA-256 per build target. Build scripts and the installer verify file presence and hashes; the app never blindly follows GitHub latest. The kernel is renamed `pc-mihomo` to avoid colliding with other proxy clients' processes.
+随包 Mihomo 内核经过版本锁定：`kernel/<版本>/manifest.json` 记录版本、许可证、源码地址，`targets` 按编译目标记录下载 URL、文件大小与 SHA-256；构建脚本与安装器都会校验文件存在性与哈希一致性，不在启动时盲目跟随 GitHub latest。内核统一重命名为 `pc-mihomo`，避免与其他代理客户端的进程重名。
 
-The Geo snapshot is pinned independently in `geodata/manifest.json` to one commit of the official MetaCubeX rule-data repository. Build and packaging checks verify all three files; Settings updates them as one rollback-capable snapshot and never performs a hidden download while validating a subscription.
+Geo 快照由 `geodata/manifest.json` 独立锁定到 MetaCubeX 官方规则数据仓库的同一 commit。构建与打包会复核三份文件；设置页将它们作为一套可回滚快照更新，订阅校验过程中不会再隐式下载。
 
-## Security model
+## 安全模型
 
-- The controller listens on `127.0.0.1` only, with a strong random secret generated per install and never written to logs
-- Subscription URLs, credentials and the controller secret never enter logs or diagnostics; raw validation errors are shown only to the current user
-- The Linux TUN service runs a pinned kernel copy as root, materializes configuration atomically into a protected directory with re-validation, and rejects bundles that do not enable TUN, bind beyond loopback, or escape their paths
-- System proxy state is written to disk atomically before touching system settings, and self-heals on the next launch after any abnormal exit
+- controller 仅监听 `127.0.0.1`，secret 为每次安装随机生成的高强度随机数，不写入日志
+- 订阅 URL、认证信息与 controller secret 不进入日志与诊断输出；错误详情只展示给当前用户
+- Linux TUN 服务以 root 运行锁定版本的内核副本，配置经原子物化到受保护目录并二次校验，拒绝未开启 TUN、非回环监听或路径越界的 bundle
+- 系统代理托管状态先原子落盘再修改系统设置，任何异常退出后下次启动自愈
 
-See the [technical design document](docs/pure-clash-architecture.md) for the full picture.
+完整设计与边界见[技术方案文档](docs/pure-clash-architecture.md)。
 
-## Roadmap
+## 路线图
 
-- Rules page and log/memory monitoring (controller `/rules`, `/logs`, `/memory`)
-- Linux credential storage and system proxy for other desktops such as KDE
-- Full macOS support (kernel guarding, window behavior, TUN boundary)
-- Code signing and an update channel
+- 规则页与日志/内存监控（controller `/rules`、`/logs`、`/memory`）
+- Linux 凭据存储与 KDE 等其他桌面的系统代理
+- macOS 完整支持（内核守护、窗口行为、TUN 边界）
+- 代码签名与更新通道
 
-## Contributing
+## 参与贡献
 
-This project itself contains a large amount of AI vibe coding, and the repository maintains [AGENTS.md](AGENTS.md) as the working agreement for AI coding agents. Vibe-coded issues and PRs are accepted and welcome — just follow the same code conventions and verification steps in the [contribution guide](CONTRIBUTING.md).
+本项目包含大量 AI vibe coding 产出，并在仓库根目录维护 [AGENTS.md](AGENTS.md) 作为 AI 编码代理的工作约定。我们接受并欢迎以 vibe coding 方式产出的 issue 与 PR——只需同样遵守[贡献指南](CONTRIBUTING.md)中的代码约定与验证流程。
 
-## Acknowledgments
+## 致谢
 
-- [Zed](https://github.com/zed-industries/zed) and GPUI — the UI framework; client-side decorations follow Zed's official examples
-- [Mihomo](https://github.com/MetaCubeX/mihomo) (MetaCubeX) — the proxy kernel that handles all traffic forwarding
-- [Clash Verge Rev](https://github.com/clash-verge-rev/clash-verge-rev) — reference for the Linux TUN service model and config templates
-- [rust-i18n](https://github.com/longbridge/rust-i18n), [ksni](https://github.com/frostwind/ksni), [tray-icon](https://github.com/tauri-apps/tray-icon) and other great open-source libraries
+- [Zed](https://github.com/zed-industries/zed) 与 GPUI：本项目的界面框架，客户端装饰等实现参考了 Zed 的官方示例
+- [Mihomo](https://github.com/MetaCubeX/mihomo)（MetaCubeX）：承担全部网络转发的代理内核
+- [Clash Verge Rev](https://github.com/clash-verge-rev/clash-verge-rev)：Linux TUN 服务模型与配置模板的参考实现
+- [rust-i18n](https://github.com/longbridge/rust-i18n)、[ksni](https://github.com/frostwind/ksni)、[tray-icon](https://github.com/tauri-apps/tray-icon) 等优秀开源库
 
-## License
+## 许可证
 
-This project is licensed under [GPL-3.0](LICENSE).
+本项目代码以 [GPL-3.0](LICENSE) 许可证发布。
 
-The bundled Mihomo kernel is an unmodified upstream GPL-3.0 binary: the full license text (`LICENSE`) and third-party notice (`NOTICE.md`) live in `kernel/<version>/`, `manifest.json` records the matching source URL, and the installer ships these files together with the kernel. The bundled MetaCubeX rule data is also GPL-3.0; its pinned source, license, and notice live in `geodata/`.
+随包分发的 Mihomo 内核是未经修改的上游 GPL-3.0 二进制：`kernel/<版本>/` 目录内提供完整许可证文本（`LICENSE`）与第三方组件说明（`NOTICE.md`），`manifest.json` 记录对应版本源码获取地址，安装器随内核一并安装这些文件。随包 MetaCubeX 规则数据同样使用 GPL-3.0，固定源码、许可证和说明位于 `geodata/`。
 
-Pure Clash is not affiliated with MetaCubeX, and nothing here represents official endorsement from the upstream project. The name Pure Clash deliberately avoids the `mihomo` token that the upstream reserves.
+Pure Clash 与 MetaCubeX 无隶属关系，也不代表上游项目对 Pure Clash 提供官方背书。Pure Clash 名称不包含上游限制的 `mihomo` 字样。
