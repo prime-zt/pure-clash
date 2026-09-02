@@ -26,7 +26,7 @@
 - `src/platform/windows/window_ctrl.rs`：Windows 主窗口重建后的显示与激活，支撑托盘唤起。
 - `src/mihomo/process.rs`：使用 `-t` 校验默认配置，按 `-d` / `-f` 启停真实内核并回收子进程；平台进程管理全部委托 `platform::KernelProcessGuard`，模块内不含平台分支；普通内核的 stdout/stderr 经泵线程逐行写入 kernel.log（打不开日志也持续排空管道）。
 - `config/mihomo/default.yaml`：嵌入程序的首次启动默认配置，仅包含一个内置 `DIRECT` 节点。
-- `src/logging.rs`：零框架文件日志（`jiff` 仅提供本地时区时间戳）。运行日志 app.log 与内核日志 kernel.log 分文件、各自按大小轮转为 `.1`（1MB+3MB 单文件上限，磁盘合计约 8MB）；宏 `log_error!`/`log_warn!`/`log_info!`/`log_debug!` 以标签区分模块，所有消息写入前经 `redact` 脱敏；panic hook 记录 panic；初始化失败降级为空日志绝不阻断启动。
+- `src/logging.rs`：零框架文件日志（`jiff` 仅提供本地时区时间戳）。运行日志 app.log 与内核日志 kernel.log 分文件、各自按大小轮转为 `.1`（1MB+3MB 单文件上限，磁盘合计约 8MB）；宏 `log_error!`/`log_warn!`/`log_info!`/`log_debug!` 以标签区分模块，所有消息写入前经 `redact` 脱敏（干净行零分配借用原文）；panic hook 记录 panic；初始化失败降级为空日志绝不阻断启动。写入路径按频率区分：app.log 低频用 `LineWriter` 逐行落盘保证崩溃诊断不丢尾，kernel.log 高频用 `BufWriter` 批量落盘（停止内核时等待泵线程排空并冲刷），轮转判断用累计字节计数而非每行查询文件元数据。
 - `src/profile.rs`：URL 订阅和本地配置文件的读取、大小/编码限制、结构校验、落盘与运行时配置同步管线。
 - `src/mihomo/config.rs`：客户端本地基线（端口/controller/secret）、订阅合并与结构预检。
 - `src/mihomo/controller.rs`：external controller REST 客户端（版本/模式/代理组）与订阅下载。
@@ -44,7 +44,7 @@
 ## 技术栈、目录与约定
 
 - Rust 2024 edition；GPUI 使用 Zed `v1.17.2` 对应提交 `c8e44cfa7bda9b2e22c8d6934d78969352e7f61a`，平台后端使用同提交的 `gpui_platform`；`rust-i18n = 4.2.1`；Windows 托盘使用 `tray-icon = 0.24.2`；unix 目标使用 `libc` 发送 SIGTERM 与设置父进程死亡信号；非 Windows 目标使用 `directories = 6.0` 解析标准用户目录。
-- 当前 Cargo 包版本为 `0.2.2`；正式发布标签必须使用匹配的 `v0.2.2`，否则发布流水线会拒绝构建。
+- 当前 Cargo 包版本为 `0.2.3`；正式发布标签必须使用匹配的 `v0.2.3`，否则发布流水线会拒绝构建。
 - UI、业务说明和代码注释使用中文；协议字段、类型名和函数名保留英文。
 - Cargo/可执行文件/安装包前缀统一为 `pure-clash`，界面和 Windows 发行名统一为 `Pure Clash`。
 - 保持单包、小依赖；平台无关路径留在 `src/platform/mod.rs`，只有实际接入系统代理、凭据、进程监管等能力时才新增 `src/platform/windows/`、`linux/` 或 `macos/` 子模块。

@@ -4,7 +4,7 @@ use std::{
     path::Path,
     process::{Child, Command, Stdio},
     sync::Arc,
-    thread,
+    thread::{self, JoinHandle},
     time::Duration,
 };
 
@@ -22,6 +22,9 @@ use crate::{
 /// [`KernelProcessGuard`]；本类型只描述内核生命周期语义，不含任何平台分支。
 pub(crate) struct MihomoProcess {
     child: KernelChild,
+    /// 普通内核 stdout/stderr 的日志泵线程；停止内核后必须等待其读到 EOF，
+    /// 确保 `BufWriter` 的尾部诊断日志在应用退出前完成冲刷。
+    log_pumps: Vec<JoinHandle<()>>,
     /// 平台守护资源；不直接读取，仅为 Drop 语义持有，且声明在 `child` 之后，
     /// 保证 Drop 时守护资源最后释放（Windows Job 句柄关闭是异常退出回收的最后防线）。
     _guard: KernelProcessGuard,
@@ -97,6 +100,7 @@ impl MihomoProcess {
         }
 
         let mut guard = KernelProcessGuard::new()?;
+        let mut log_pumps = Vec::new();
         let mut child = if elevated {
             // 提权进程经 ShellExecuteExW(UAC)/systemd 服务创建，stdout 无法由
             // 客户端捕获：Windows 无句柄继承、Linux 输出进入 journal。
@@ -140,14 +144,26 @@ impl MihomoProcess {
                 log_error!("kernel", "无法为内核进程挂接平台守护：{error:#}");
                 return Err(error).context("无法为内核进程挂接平台守护");
             }
-            spawn_kernel_log_pumps(&mut child, paths);
+            log_pumps = spawn_kernel_log_pumps(&mut child, paths);
             KernelChild::Normal(child)
         };
 
         // 配置校验无法发现端口占用等运行期错误，短暂确认进程没有立即退出。
         thread::sleep(Duration::from_millis(150));
-        if child.exited().context("无法读取 Mihomo 启动状态")? {
+        let exited = match child.exited() {
+            Ok(exited) => exited,
+            Err(error) => {
+                // 状态查询失败时不能让已启动内核和日志泵脱离管理；先终止进程，
+                // 再等待管道排空，最后把原始查询错误返回给上层。
+                if child.terminate().is_ok() {
+                    join_kernel_log_pumps(&mut log_pumps);
+                }
+                return Err(error).context("无法读取 Mihomo 启动状态");
+            }
+        };
+        if exited {
             let _ = child.terminate();
+            join_kernel_log_pumps(&mut log_pumps);
             log_error!(
                 "kernel",
                 "Mihomo 启动后立即退出（提权被拒绝或配置存在运行期错误）"
@@ -157,17 +173,23 @@ impl MihomoProcess {
 
         Ok(Self {
             child,
+            log_pumps,
             _guard: guard,
         })
     }
 
     /// 终止并回收当前 Mihomo 子进程；进程已经退出时同样视为成功。
     pub(crate) fn stop(&mut self) -> Result<()> {
-        // 无法读取状态时仍尝试终止，优先保证后台进程不会残留。
-        if self.child.exited().unwrap_or(true) {
-            return Ok(());
+        // 无法读取状态时仍尝试终止，优先保证后台进程不会残留。只有确认进程
+        // 已退出后才等待泵线程，避免仍持有管道写端时在 join 中永久阻塞。
+        let result = match self.child.exited() {
+            Ok(true) => Ok(()),
+            Ok(false) | Err(_) => self.child.terminate(),
+        };
+        if result.is_ok() {
+            join_kernel_log_pumps(&mut self.log_pumps);
         }
-        self.child.terminate()
+        result
     }
 
     /// 非阻塞读取受管进程是否仍存活；查询失败按已退出处理，让上层及时撤销
@@ -189,28 +211,34 @@ impl MihomoProcess {
 ///
 /// 日志文件打不开时返回的写入器为 `None`，泵线程仍持续读取并丢弃，保证
 /// 内核不会因管道无人读取而阻塞。泵线程与内核进程同生命周期：内核退出后
-/// 管道读到 EOF 自然结束，应用退出时内核由平台守护兜底回收。
-fn spawn_kernel_log_pumps(child: &mut Child, paths: &AppPaths) {
+/// 管道读到 EOF 自然结束，线程句柄由 [`MihomoProcess`] 持有并在停止时等待。
+fn spawn_kernel_log_pumps(child: &mut Child, paths: &AppPaths) -> Vec<JoinHandle<()>> {
     let writer = KernelLogWriter::open(&paths.log_dir);
     if writer.is_none() {
         log_warn!("kernel", "无法打开内核日志文件，本轮内核输出将被丢弃");
     }
-    if let Some(stdout) = child.stdout.take() {
-        spawn_kernel_log_pump(stdout, writer.clone());
+    let mut pumps = Vec::with_capacity(2);
+    if let Some(stdout) = child.stdout.take()
+        && let Some(pump) = spawn_kernel_log_pump(stdout, writer.clone())
+    {
+        pumps.push(pump);
     }
-    if let Some(stderr) = child.stderr.take() {
-        spawn_kernel_log_pump(stderr, writer);
+    if let Some(stderr) = child.stderr.take()
+        && let Some(pump) = spawn_kernel_log_pump(stderr, writer)
+    {
+        pumps.push(pump);
     }
+    pumps
 }
 
 /// 单条管道的泵线程；内核退出后读到 EOF 自然结束。
 fn spawn_kernel_log_pump<R: std::io::Read + Send + 'static>(
     stream: R,
     writer: Option<Arc<KernelLogWriter>>,
-) {
+) -> Option<JoinHandle<()>> {
     // 线程创建失败仅剩丢弃流一种选择（系统已无法创建线程），内核随后的
     // 管道写入会收到错误；该场景实际只在资源耗尽时出现。
-    let _ = thread::Builder::new()
+    thread::Builder::new()
         .name("pure-clash-kernel-log".to_owned())
         .spawn(move || {
             let reader = BufReader::new(stream);
@@ -224,7 +252,18 @@ fn spawn_kernel_log_pump<R: std::io::Read + Send + 'static>(
                     Err(_) => break,
                 }
             }
-        });
+        })
+        .ok()
+}
+
+/// 内核退出后等待 stdout/stderr 泵线程排空管道；线程持有的最后一个 writer
+/// 随后 Drop 并冲刷缓冲。泵线程 panic 只影响诊断日志，不能阻断内核回收。
+fn join_kernel_log_pumps(pumps: &mut Vec<JoinHandle<()>>) {
+    for pump in pumps.drain(..) {
+        if pump.join().is_err() {
+            log_warn!("kernel", "内核日志泵线程异常退出，尾部日志可能不完整");
+        }
+    }
 }
 
 impl Drop for MihomoProcess {
@@ -379,6 +418,34 @@ time=3 level=error msg=\"rules[0] error: can't download GeoSite.dat\"\n";
             validation_error_detail("first line\nfinal detail", "", 12),
             "…final detail"
         );
+    }
+
+    #[test]
+    fn joining_log_pump_flushes_buffered_tail() {
+        let root = std::env::temp_dir().join(format!(
+            "pure-clash-log-pump-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("系统时间应晚于 UNIX_EPOCH")
+                .as_nanos()
+        ));
+        let writer = KernelLogWriter::open(&root).expect("应打开内核日志");
+        let pump = spawn_kernel_log_pump(
+            std::io::Cursor::new(b"buffered-tail\n".to_vec()),
+            Some(writer),
+        )
+        .expect("应创建日志泵线程");
+        let mut pumps = vec![pump];
+
+        join_kernel_log_pumps(&mut pumps);
+
+        assert!(pumps.is_empty(), "等待后不应保留已完成线程");
+        assert_eq!(
+            fs::read_to_string(root.join("kernel.log")).expect("应读取已冲刷的内核日志"),
+            "buffered-tail\n"
+        );
+        fs::remove_dir_all(root).expect("应清理测试日志目录");
     }
 
     #[cfg(any(target_os = "windows", unix))]
