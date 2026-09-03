@@ -108,6 +108,19 @@ impl Controller {
         Ok(())
     }
 
+    /// 运行时切换进程匹配模式（`always` / `strict` / `off`）；内核热生效，
+    /// 不重启进程、不断开存量连接。
+    pub(crate) fn patch_find_process_mode(&self, mode: &str) -> Result<()> {
+        self.agent
+            .patch(&format!("{}/configs", self.base_url))
+            .set("Authorization", &self.authorization())
+            .set("Content-Type", "application/json")
+            .send_json(ureq::json!({ "find-process-mode": mode }))
+            .map_err(|error| anyhow::anyhow!("{error}"))
+            .with_context(|| format!("无法切换进程匹配模式到 {mode}"))?;
+        Ok(())
+    }
+
     /// 读取全部代理与策略组；`mode` 用于决定是否包含 GLOBAL 组。
     pub(crate) fn proxies(&self, mode: Mode) -> Result<ProxiesSnapshot> {
         let value: ProxiesResponse = self

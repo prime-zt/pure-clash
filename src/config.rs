@@ -95,6 +95,9 @@ pub(crate) struct AppConfig {
     pub(crate) theme: Theme,
     /// 界面语言，可选值为 `zh-CN` 或 `en-US`，默认为 `zh-CN`。
     pub(crate) language: Language,
+    /// 强制为每条连接匹配发起进程（注入 `find-process-mode: always`）；
+    /// 关闭时不注入，使用内核默认行为。开关以此文件为唯一事实来源。
+    pub(crate) find_process_always: bool,
     /// 订阅与导入的配置列表，按添加顺序展示。
     pub(crate) profiles: Vec<ProfileMeta>,
     /// 当前激活的配置 id；None 表示使用内置默认配置。
@@ -108,6 +111,7 @@ impl Default for AppConfig {
             bundled_mihomo_version: Some(default_mihomo_version()),
             theme: Theme::default(),
             language: Language::default(),
+            find_process_always: false,
             profiles: Vec::new(),
             active_profile: None,
         }

@@ -63,6 +63,15 @@ pub(super) fn render_settings(
                     cx.listener(|this, _, _, cx| this.toggle_tun(cx)),
                 ))
                 .child(setting_row(
+                    "setting-find-process",
+                    tr("settings.find_process"),
+                    tr("settings.find_process_detail"),
+                    app.config.find_process_always,
+                    app.baseline.is_some(),
+                    palette,
+                    cx.listener(|this, _, _, cx| this.toggle_find_process(cx)),
+                ))
+                .child(setting_row(
                     "setting-dark-theme",
                     tr("settings.dark_theme"),
                     tr("settings.dark_theme_detail"),

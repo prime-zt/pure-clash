@@ -23,6 +23,9 @@ pub(crate) struct LocalBaseline {
     pub(crate) secret: String,
     /// TUN 模式开关；由用户显式授权，重启内核时经此字段注入配置。
     pub(crate) tun_enable: bool,
+    /// 强制进程匹配开关；开启时向 runtime 注入 `find-process-mode: always`，
+    /// 由 app.json 的开关在启动时对齐到基线。
+    pub(crate) find_process_always: bool,
 }
 
 /// 读取或生成客户端本地基线文件。
@@ -40,6 +43,7 @@ pub(crate) fn ensure_baseline(paths: &AppPaths) -> Result<LocalBaseline> {
         controller_addr: "127.0.0.1:9097".to_owned(),
         secret: Uuid::new_v4().to_string(),
         tun_enable: false,
+        find_process_always: false,
     };
     crate::platform::file::atomic_write(file, baseline.to_yaml().as_bytes())
         .with_context(|| format!("无法写入本地基线配置：{}", file.display()))?;
@@ -81,6 +85,12 @@ impl LocalBaseline {
         // 内置配置和所有订阅，避免不同配置来源产生不一致的连接行为。
         set("unified-delay", Value::from(true));
         set("tcp-concurrent", Value::from(true));
+        // strict（内核默认）下内核只在规则需要时查找进程，多数订阅没有
+        // PROCESS 规则，连接页进程名恒为空；开启后强制为每条连接匹配进程。
+        // 关闭时不注入，保留订阅自带值。
+        if self.find_process_always {
+            set("find-process-mode", Value::from("always"));
+        }
         // TUN 开启时放行 IPv6，由 Mihomo 的默认双栈 TUN 地址和 auto-route 接管；
         // 关闭时保持 false。
         set("ipv6", Value::from(self.tun_enable));
@@ -193,12 +203,18 @@ fn parse_baseline(content: &str) -> Result<LocalBaseline> {
         .and_then(|tun| tun.get("enable"))
         .and_then(Value::as_bool)
         .unwrap_or(false);
+    // find-process-mode 仅在显式为 always 时视为开启；其余值（含缺失）关闭。
+    let find_process_always = mapping
+        .get(Value::from("find-process-mode"))
+        .and_then(Value::as_str)
+        .is_some_and(|mode| mode.eq_ignore_ascii_case("always"));
 
     Ok(LocalBaseline {
         mixed_port: mixed_port as u16,
         controller_addr: controller_addr.to_owned(),
         secret: secret.to_owned(),
         tun_enable,
+        find_process_always,
     })
 }
 
@@ -355,6 +371,7 @@ mod tests {
             controller_addr: "127.0.0.1:9097".to_owned(),
             secret: "test-secret".to_owned(),
             tun_enable: false,
+            find_process_always: false,
         }
     }
 
@@ -592,6 +609,38 @@ proxy-groups:
         // 基线文件序列化往返保留 TUN 开关。
         let roundtrip = parse_baseline(&enabled.to_yaml()).expect("基线往返应成功");
         assert_eq!(roundtrip, enabled);
+    }
+
+    #[test]
+    fn find_process_mode_follows_baseline_toggle() {
+        // 开启：注入 always，覆盖订阅自带值。
+        let mut enabled = baseline();
+        enabled.find_process_always = true;
+        let merged = merge_runtime(
+            "find-process-mode: strict\nrules:\n- MATCH,DIRECT",
+            &enabled,
+        )
+        .expect("应完成合并");
+        let value: Value = serde_yaml::from_str(&merged).expect("合并产物应是有效 YAML");
+        assert_eq!(value.get("find-process-mode"), Some(&Value::from("always")));
+        // 基线序列化往返保留开关。
+        let roundtrip = parse_baseline(&enabled.to_yaml()).expect("基线往返应成功");
+        assert_eq!(roundtrip, enabled);
+
+        // 关闭：不注入，订阅自带值原样保留（内核默认行为由内核决定）。
+        let merged = merge_runtime(
+            "find-process-mode: strict\nrules:\n- MATCH,DIRECT",
+            &baseline(),
+        )
+        .expect("应完成合并");
+        let value: Value = serde_yaml::from_str(&merged).expect("合并产物应是有效 YAML");
+        assert_eq!(value.get("find-process-mode"), Some(&Value::from("strict")));
+
+        // 旧基线缺少该字段时按关闭读取。
+        let legacy =
+            parse_baseline("mixed-port: 7890\nexternal-controller: 127.0.0.1:9097\nsecret: s\n")
+                .expect("旧基线应可解析");
+        assert!(!legacy.find_process_always);
     }
 
     #[test]

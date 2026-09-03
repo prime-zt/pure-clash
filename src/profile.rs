@@ -288,6 +288,7 @@ mod tests {
             controller_addr: "127.0.0.1:19098".to_owned(),
             secret: "activate-secret".to_owned(),
             tun_enable: false,
+            find_process_always: false,
         };
         let profile_yaml = "\
 proxies:

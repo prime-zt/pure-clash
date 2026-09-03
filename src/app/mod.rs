@@ -307,13 +307,23 @@ impl PureClash {
         );
 
         // 本地基线提供 controller 地址与 secret；失败时仅禁用在线功能。
-        let baseline = match ensure_baseline(&paths) {
+        let mut baseline = match ensure_baseline(&paths) {
             Ok(baseline) => Some(baseline),
             Err(error) => {
                 log_error!("core", "初始化本地基线失败：{error:#}");
                 None
             }
         };
+        // 强制进程名开关以 app.json 为唯一事实来源：启动时把开关对齐到基线，
+        // 后续 runtime 生成的 `find-process-mode` 便与界面状态一致。
+        if let Some(baseline) = baseline.as_mut()
+            && baseline.find_process_always != config.find_process_always
+        {
+            baseline.find_process_always = config.find_process_always;
+            if let Err(error) = save_baseline(&paths, baseline) {
+                log_error!("core", "同步进程匹配开关到本地基线失败：{error:#}");
+            }
+        }
 
         // 校验持久化的激活配置：内容缺失时回退到内置默认配置。
         if let Some(active_id) = config.active_profile.clone()
@@ -1534,6 +1544,101 @@ impl PureClash {
         self.tun_effective = false;
         if self.core_active() {
             self.restart_core(cx);
+        }
+        Ok(())
+    }
+
+    /// 强制进程名开关：app.json 先行持久化，基线与 runtime 走同一 `-t` 事务；
+    /// 运行中的内核经 controller 热切换，不重启进程、不断开存量连接。
+    fn toggle_find_process(&mut self, cx: &mut Context<Self>) {
+        let Some(previous_baseline) = self.baseline.clone() else {
+            self.integration_error = Some(t!("app.baseline_missing").into_owned());
+            cx.notify();
+            return;
+        };
+        let enabled = !self.config.find_process_always;
+
+        // app.json 是开关的唯一事实来源；保存失败时不产生任何后续变更。
+        let previous_setting = self.config.find_process_always;
+        self.config.find_process_always = enabled;
+        if let Err(error) = self.config.save(&self.paths.config_file) {
+            self.config.find_process_always = previous_setting;
+            log_warn!("app", "保存强制进程名开关失败：{error:#}");
+            self.integration_error = Some(concise_error(&format!("{error:#}"), 160));
+            cx.notify();
+            return;
+        }
+
+        let mut desired = previous_baseline;
+        desired.find_process_always = enabled;
+        match self.apply_find_process_configuration(&desired, cx) {
+            Ok(()) => {
+                log_info!(
+                    "app",
+                    "强制进程名已{}",
+                    if enabled { "开启" } else { "关闭" }
+                );
+                self.integration_error = None;
+            }
+            Err(error) => {
+                // 配置事务失败时回滚 app.json，保持开关显示与实际生效一致。
+                self.config.find_process_always = previous_setting;
+                let _ = self.config.save(&self.paths.config_file);
+                log_error!("app", "应用强制进程名配置失败：{error:#}");
+                self.integration_error = Some(concise_error(&format!("{error:#}"), 180));
+            }
+        }
+        cx.notify();
+    }
+
+    /// 提交进程匹配配置：先 `-t` 终审再原子落盘基线与 runtime，任一步失败
+    /// 都不改变磁盘状态；成功后运行中的内核经 controller 即时生效。
+    fn apply_find_process_configuration(
+        &mut self,
+        desired: &crate::mihomo::config::LocalBaseline,
+        cx: &mut Context<Self>,
+    ) -> anyhow::Result<()> {
+        let runtime = profile::prepare_runtime(
+            &self.paths,
+            Some(desired),
+            &self.config.mihomo_version,
+            self.active_profile.as_deref(),
+        )?;
+        save_baseline(&self.paths, desired)?;
+        if let Err(error) = write_runtime(&self.paths, &runtime) {
+            // runtime 写入失败时回滚基线，保持磁盘一致。
+            if let Some(previous) = self.baseline.as_ref() {
+                let _ = save_baseline(&self.paths, previous);
+            }
+            return Err(error);
+        }
+        self.baseline = Some(desired.clone());
+        // 内核运行中热切换；正在启动的内核沿用旧模式，下次重启从磁盘生效。
+        if self.mihomo_running()
+            && let Some(controller) = self.controller()
+        {
+            let mode = if desired.find_process_always {
+                "always"
+            } else {
+                "strict"
+            };
+            cx.spawn(async move |this, cx| {
+                let result = cx
+                    .background_executor()
+                    .spawn(async move { controller.patch_find_process_mode(mode) })
+                    .await;
+                if let Err(error) = result {
+                    let _ = this.update(cx, |this, cx| {
+                        log_warn!(
+                            "app",
+                            "运行中内核切换进程匹配模式失败（重启内核后生效）：{error:#}"
+                        );
+                        this.integration_error = Some(concise_error(&format!("{error:#}"), 180));
+                        cx.notify();
+                    });
+                }
+            })
+            .detach();
         }
         Ok(())
     }
