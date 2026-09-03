@@ -25,6 +25,8 @@ pub(crate) struct Controller {
     agent: ureq::Agent,
     /// 延迟测试的内核侧超时可达数秒，HTTP 超时必须宽于探测时长。
     slow_agent: ureq::Agent,
+    /// 热重载可能让内核重新读取 Geo 数据，超时对齐 Clash Verge Rev 给足 60 秒。
+    reload_agent: ureq::Agent,
 }
 
 impl Controller {
@@ -37,11 +39,15 @@ impl Controller {
         let slow_agent = ureq::AgentBuilder::new()
             .timeout(Duration::from_secs(10))
             .build();
+        let reload_agent = ureq::AgentBuilder::new()
+            .timeout(Duration::from_secs(60))
+            .build();
         Self {
             base_url: format!("http://{}", baseline.controller_addr),
             secret: baseline.secret.clone(),
             agent,
             slow_agent,
+            reload_agent,
         }
     }
 
@@ -118,6 +124,24 @@ impl Controller {
             .send_json(ureq::json!({ "find-process-mode": mode }))
             .map_err(|error| anyhow::anyhow!("{error}"))
             .with_context(|| format!("无法切换进程匹配模式到 {mode}"))?;
+        Ok(())
+    }
+
+    /// 触发内核进程内热重载：`PUT /configs?force=true` 携带完整 YAML 内容。
+    /// 内核进程保持存活、既有连接不主动断开，新配置对后续连接生效。
+    /// 用 `payload` 而非 `path`：内核对 path 做了 home 目录 / SAFE_PATHS
+    /// 安全校验，而 runtime.yaml 位于 `config/mihomo`（home 外）必被拒绝；
+    /// payload 直接在请求体内传内容，不受路径限制（本机回环 + secret 认证）。
+    /// 失败由调用方回退整进程重启，与 Clash Verge Rev 的应用策略一致。
+    pub(crate) fn reload_config(&self, runtime_yaml: &str) -> Result<()> {
+        self.reload_agent
+            .put(&format!("{}/configs", self.base_url))
+            .query("force", "true")
+            .set("Authorization", &self.authorization())
+            .set("Content-Type", "application/json")
+            .send_json(ureq::json!({ "payload": runtime_yaml }))
+            .map_err(|error| anyhow::anyhow!("{error}"))
+            .context("无法热重载内核配置")?;
         Ok(())
     }
 

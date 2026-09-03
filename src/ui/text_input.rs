@@ -93,6 +93,17 @@ impl TextInput {
         &self.content
     }
 
+    /// 以程序方式整体替换内容（如打开行内编辑器时回填现有值）；
+    /// 光标与选区归零，清除 IME 标记，并使布局缓存失效。
+    pub(crate) fn set_content(&mut self, content: String, cx: &mut Context<Self>) {
+        self.content = content.into();
+        self.selected_range = 0..0;
+        self.selection_reversed = false;
+        self.marked_range = None;
+        self.last_layout = None;
+        cx.notify();
+    }
+
     fn left(&mut self, _: &Left, _: &mut Window, cx: &mut Context<Self>) {
         if self.selected_range.is_empty() {
             self.move_to(self.previous_boundary(self.cursor_offset()), cx);

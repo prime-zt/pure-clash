@@ -190,6 +190,8 @@ pub(super) struct TrayTexts {
 const CONNECTIONS_RENDER_LIMIT: usize = 200;
 /// 实时连接与流量的轮询间隔；与内核 dashboard 的默认推送节奏一致。
 const CONNECTIONS_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
+/// 订阅自动更新调度器的检查间隔；到期判断是墙钟比较，跳频只影响响应速度。
+const PROFILE_UPDATE_TICK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
 
 pub(crate) struct PureClash {
     page: Page,
@@ -254,6 +256,13 @@ pub(crate) struct PureClash {
     /// 配置页后台任务忙态提示；非空时禁用相关操作。
     profile_busy: Option<String>,
     profile_error: Option<String>,
+    /// 正在自动更新的配置 id；与手动操作（profile_busy）互斥。
+    /// 自动更新静默执行，不占用 profile_busy 以免打扰界面。
+    auto_update_in_flight: Option<String>,
+    /// 行内编辑自动更新间隔的配置下标；None 表示未在编辑。
+    editing_profile_index: Option<usize>,
+    /// 行内编辑自动更新间隔的输入框。
+    profile_form_interval: Entity<TextInput>,
     /// 登录自启、系统代理与 TUN 的操作失败提示，展示在设置页与概览页。
     integration_error: Option<String>,
     /// 当前已安装 Geo 数据的官方提交与更新时间。
@@ -361,6 +370,8 @@ impl PureClash {
 
         let profile_form_name = cx.new(|cx| TextInput::new(t!("profiles.name_placeholder"), cx));
         let profile_form_url = cx.new(|cx| TextInput::new(t!("profiles.url_placeholder"), cx));
+        let profile_form_interval =
+            cx.new(|cx| TextInput::new(t!("profiles.interval_placeholder"), cx));
         let profiles = config.profiles.clone();
         let (autostart_enabled, autostart_available) = match autostart_status() {
             Ok(AutoStartStatus::Enabled) => (true, true),
@@ -415,6 +426,9 @@ impl PureClash {
             profile_form_url,
             profile_busy: None,
             profile_error: runtime_error,
+            auto_update_in_flight: None,
+            editing_profile_index: None,
+            profile_form_interval,
             integration_error: None,
             geodata_info,
             geodata_updating: false,
@@ -434,6 +448,7 @@ impl PureClash {
             app.start_core(cx);
         }
         app.spawn_connection_poll(cx);
+        app.spawn_profile_update_scheduler(cx);
         app
     }
 
@@ -1604,6 +1619,15 @@ impl PureClash {
             &self.config.mihomo_version,
             self.active_profile.as_deref(),
         )?;
+        // 切换前快照：运行中内核 PATCH 失败时按此整体回滚（内存开关、
+        // app.json、基线与 runtime），保证界面显示与实际运行状态一致。
+        // 调用方 toggle 以取反方式切换，旧开关值即 !desired 的值；
+        // 能走到热切换说明基线存在（controller 由基线构造）。
+        let rollback_setting = !desired.find_process_always;
+        let Some(rollback_baseline) = self.baseline.clone() else {
+            return Ok(());
+        };
+        let rollback_runtime = std::fs::read_to_string(&self.paths.runtime_mihomo_config_file).ok();
         save_baseline(&self.paths, desired)?;
         if let Err(error) = write_runtime(&self.paths, &runtime) {
             // runtime 写入失败时回滚基线，保持磁盘一致。
@@ -1631,9 +1655,31 @@ impl PureClash {
                     let _ = this.update(cx, |this, cx| {
                         log_warn!(
                             "app",
-                            "运行中内核切换进程匹配模式失败（重启内核后生效）：{error:#}"
+                            "运行中内核切换进程匹配模式失败，回滚开关设置：{error:#}"
                         );
-                        this.integration_error = Some(concise_error(&format!("{error:#}"), 180));
+                        // 完整回滚四处状态，与磁盘写入事务的失败回滚对齐：
+                        // 内存开关、app.json、local.yaml、runtime.yaml。
+                        this.config.find_process_always = rollback_setting;
+                        if let Err(save_error) = this.config.save(&this.paths.config_file) {
+                            log_warn!("app", "回滚 app.json 失败：{save_error:#}");
+                        }
+                        if let Err(baseline_error) = save_baseline(&this.paths, &rollback_baseline)
+                        {
+                            log_warn!("app", "回滚本地基线失败：{baseline_error:#}");
+                        }
+                        if let Some(old_runtime) = rollback_runtime.as_deref()
+                            && let Err(runtime_error) = write_runtime(&this.paths, old_runtime)
+                        {
+                            log_warn!("app", "回滚运行时配置失败：{runtime_error:#}");
+                        }
+                        this.baseline = Some(rollback_baseline);
+                        this.integration_error = Some(
+                            t!(
+                                "app.find_process_rollback",
+                                error = concise_error(&format!("{error:#}"), 160)
+                            )
+                            .into_owned(),
+                        );
                         cx.notify();
                     });
                 }
@@ -1724,9 +1770,17 @@ impl PureClash {
         }
     }
 
+    /// 配置页动作互斥锁：手动忙态、行内间隔编辑或后台自动更新进行中时，
+    /// 暂停其他会修改配置列表 / profile 文件的操作，避免并发写与下标漂移。
+    fn profile_actions_locked(&self) -> bool {
+        self.profile_busy.is_some()
+            || self.editing_profile_index.is_some()
+            || self.auto_update_in_flight.is_some()
+    }
+
     /// 打开或关闭添加配置的内联表单。
     fn toggle_profile_form(&mut self, cx: &mut Context<Self>) {
-        if self.profile_busy.is_some() {
+        if self.profile_actions_locked() {
             return;
         }
         self.profile_form_open = !self.profile_form_open;
@@ -1738,7 +1792,7 @@ impl PureClash {
 
     /// 确认添加订阅：后台下载并校验，通过后保存并自动激活。
     fn add_subscription(&mut self, cx: &mut Context<Self>) {
-        if self.profile_busy.is_some() {
+        if self.profile_actions_locked() {
             return;
         }
         let url = self.profile_form_url.read(cx).content().trim().to_owned();
@@ -1747,6 +1801,22 @@ impl PureClash {
             cx.notify();
             return;
         }
+        // 间隔先于下载校验：非法输入立即反馈，不浪费一次下载。
+        let interval_input = self
+            .profile_form_interval
+            .read(cx)
+            .content()
+            .trim()
+            .to_owned();
+        let interval = match profile::parse_update_interval(&interval_input) {
+            Ok(minutes) => minutes,
+            Err(error) => {
+                self.profile_error =
+                    Some(t!("profiles.interval_invalid", error = error.to_string()).into_owned());
+                cx.notify();
+                return;
+            }
+        };
         let name = {
             let input = self.profile_form_name.read(cx).content().trim().to_owned();
             if input.is_empty() {
@@ -1784,6 +1854,10 @@ impl PureClash {
                     let mut meta = profile::subscription_meta(name, url);
                     // 文件已按后台任务生成的 id 落盘，元数据必须使用同一 id。
                     meta.id = id;
+                    meta.update_interval_minutes = interval;
+                    if interval > 0 {
+                        log_info!("profile", "新订阅自动更新间隔：{interval} 分钟");
+                    }
                     let index = this.profiles.len();
                     this.profiles.push(meta);
                     this.save_profiles();
@@ -1802,7 +1876,7 @@ impl PureClash {
 
     /// 选择并导入本地 Mihomo YAML；只保存校验后的内容副本，不持久化源文件路径。
     fn import_local_profile(&mut self, cx: &mut Context<Self>) {
-        if self.profile_busy.is_some() {
+        if self.profile_actions_locked() {
             return;
         }
         let preferred_name = self.profile_form_name.read(cx).content().trim().to_owned();
@@ -1918,7 +1992,7 @@ impl PureClash {
 
     /// 重新下载订阅内容并更新时间戳；激活中的配置同时刷新内核。
     fn update_profile(&mut self, index: usize, cx: &mut Context<Self>) {
-        if self.profile_busy.is_some() {
+        if self.profile_actions_locked() {
             return;
         }
         let Some(meta) = self.profiles.get(index) else {
@@ -1979,9 +2053,320 @@ impl PureClash {
         .detach();
     }
 
+    /// 订阅自动更新调度：常驻任务每分钟一跳，按墙钟到期比较挑一个到期订阅。
+    ///
+    /// 挂在 PureClash 实体上（与连接轮询同模式），主窗口关闭、后台自启模式
+    /// 下照常运行；睡眠/休眠唤醒后 due-time 立即成立，自动补跑错过的更新。
+    /// 首跳延迟 90 秒，避开内核启动、系统代理自愈与就绪探针的窗口。
+    fn spawn_profile_update_scheduler(&mut self, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            // 启动缓冲：登录自启阶段不与内核拉起、代理自愈抢时间。
+            cx.background_executor()
+                .timer(std::time::Duration::from_secs(90))
+                .await;
+            loop {
+                cx.background_executor()
+                    .timer(PROFILE_UPDATE_TICK_INTERVAL)
+                    .await;
+                // 主线程实体回调里挑到期订阅；与手动操作、进行中的自动更新
+                // 互斥，内核 Starting 期间不做任何配置变更。
+                let index = this
+                    .update(cx, |this, _| {
+                        if this.profile_busy.is_some()
+                            || this.auto_update_in_flight.is_some()
+                            || this.core_state == CoreState::Starting
+                        {
+                            return None;
+                        }
+                        let now = profile::now_secs();
+                        this.profiles
+                            .iter()
+                            .position(|meta| profile::subscription_due(meta, now))
+                    })
+                    .ok()
+                    .flatten();
+                let Some(index) = index else {
+                    continue;
+                };
+                this.update(cx, |this, cx| this.auto_update_profile(index, cx))
+                    .ok();
+            }
+        })
+        .detach();
+    }
+
+    /// 自动更新一个到期订阅：静默执行（不占用 profile_busy），下载校验与
+    /// 手动更新共用链路；失败只记日志与尝试时间，不打扰界面。
+    ///
+    /// 应用策略分三级：内容与磁盘一致时只刷时间戳跳过一切配置变更（也不必
+    /// 再跑内核 `-t` 终审）；有变更且命中激活订阅时优先 controller 热重载
+    /// （`PUT /configs?force=true`，进程存活、既有连接不断），热重载失败才
+    /// 回退整进程重启，与 Clash Verge Rev 的应用姿态一致。
+    ///
+    /// 互斥与成功标记的时序：`auto_update_in_flight` 保持到本次更新的应用
+    /// 真正结束（热重载完成或回退重启发起）才释放，期间配置页全部动作锁定，
+    /// 避免热重载晚到的结果覆盖用户刚做的变更。`updated_at` 只在内容确定
+    /// 持久化后刷新：写 runtime 失败会回滚 profile 文件并保留旧 updated_at，
+    /// 下次到期重新下载时内容比对不再命中，自然重走完整链路修复 runtime。
+    fn auto_update_profile(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(meta) = self.profiles.get(index) else {
+            return;
+        };
+        let Some(url) = meta.url.clone() else {
+            return;
+        };
+        let id = meta.id.clone();
+        self.auto_update_in_flight = Some(id.clone());
+        let version = self.config.mihomo_version.clone();
+        let paths = self.paths.clone();
+        let host = host_of_url(&url).to_owned();
+        let name = meta.name.clone();
+        log_info!("profile", "订阅到期，自动更新开始（{name}，{host}）");
+
+        cx.spawn(async move |this, cx| {
+            let id_inner = id.clone();
+            // Ok(None) = 内容无变化；Ok(Some((合并产物, 旧 profile 内容))) =
+            // 已落盘新内容，旧内容供写 runtime 失败时回滚（None = 原本无文件）。
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    let content = profile::download_subscription(&url)?;
+                    let profile_path = profile::profile_yaml_path(&paths, &id_inner);
+                    // 与磁盘上的现有内容直接比对（本地比较，语义等同哈希且
+                    // 无碰撞）：一致则磁盘内容已通过校验，跳过落盘与 -t 终审。
+                    let existing = std::fs::read_to_string(&profile_path).ok();
+                    if existing.as_deref() == Some(content.as_str()) {
+                        return Ok::<_, anyhow::Error>(None);
+                    }
+                    let runtime =
+                        profile::validate_and_store(&paths, &version, &id_inner, &content)?;
+                    Ok(Some((runtime, existing)))
+                })
+                .await;
+
+            let _ = this.update(cx, |this, cx| {
+                // 配置可能在下载期间被删除；按 id 而非下标定位。
+                let index = this.profiles.iter().position(|meta| meta.id == id);
+                let Some(index) = index else {
+                    this.auto_update_in_flight = None;
+                    return;
+                };
+                // 无论后续应用结果如何都记录尝试时间，顺延下一个完整间隔。
+                let now = profile::now_secs();
+                if let Some(meta) = this.profiles.get_mut(index) {
+                    meta.last_auto_attempt_at = now;
+                }
+                match result {
+                    Ok(None) => {
+                        // 内容无变化：只刷时间戳，不产生任何配置变更。
+                        if let Some(meta) = this.profiles.get_mut(index) {
+                            meta.updated_at = now;
+                        }
+                        this.save_profiles();
+                        this.auto_update_in_flight = None;
+                        log_info!(
+                            "profile",
+                            "订阅自动更新：内容无变化，跳过应用（{name}，{host}）"
+                        );
+                    }
+                    Ok(Some((runtime, existing))) => {
+                        // 非激活订阅只落盘 profile 文件，不动内核：落盘完成
+                        // 即本次更新结束。
+                        if this.active_profile.as_deref() != Some(id.as_str()) {
+                            if let Some(meta) = this.profiles.get_mut(index) {
+                                meta.updated_at = now;
+                            }
+                            this.save_profiles();
+                            this.auto_update_in_flight = None;
+                            log_info!(
+                                "profile",
+                                "订阅自动更新成功（{name}，{host}，非激活仅落盘）"
+                            );
+                            cx.notify();
+                            return;
+                        }
+                        // 激活订阅：写 runtime 失败必须回滚 profile 文件并保留
+                        // 旧 updated_at——否则下次到期会因下载内容与磁盘相同
+                        // 走跳过路径，旧 runtime 永远得不到修复。
+                        if let Err(error) = write_runtime(&this.paths, &runtime) {
+                            let profile_path = profile::profile_yaml_path(&this.paths, &id);
+                            let rollback = match existing.as_deref() {
+                                Some(old_content) => crate::platform::file::atomic_write(
+                                    &profile_path,
+                                    old_content.as_bytes(),
+                                ),
+                                None => {
+                                    std::fs::remove_file(&profile_path).map_err(anyhow::Error::from)
+                                }
+                            };
+                            if let Err(rollback_error) = rollback {
+                                // 回滚失败只记日志：该场景需要磁盘写连续两次
+                                // 失败，概率极低，下次到期仍会重试。
+                                log_error!("profile", "回滚订阅文件失败：{rollback_error:#}");
+                            }
+                            this.save_profiles();
+                            this.auto_update_in_flight = None;
+                            log_error!(
+                                "profile",
+                                "写入运行时配置失败，已回滚订阅内容（{name}，{host}）：{error:#}"
+                            );
+                            cx.notify();
+                            return;
+                        }
+                        // runtime 已持久化：从这一刻起内容终将生效（热重载/
+                        // 重启/下次启动），刷新 updated_at 是安全的。
+                        if let Some(meta) = this.profiles.get_mut(index) {
+                            meta.updated_at = now;
+                        }
+                        this.save_profiles();
+                        log_info!("profile", "订阅自动更新成功（{name}，{host}）");
+                        if !this.mihomo_running() {
+                            // 内核未运行（含启动中）：新 runtime 下次启动时生效。
+                            this.auto_update_in_flight = None;
+                            log_info!("profile", "内核未运行，新配置将在下次启动时生效");
+                            cx.notify();
+                            return;
+                        }
+                        match this.controller() {
+                            Some(controller) => {
+                                // 热重载优先：互斥保持到热重载结束（或回退
+                                // 重启发起）后才释放；此时 runtime 已落盘，
+                                // 重启路径由 Starting 状态与启动代次机制接管。
+                                let runtime_yaml = runtime;
+                                cx.spawn(async move |this, cx| {
+                                    let result = cx
+                                        .background_executor()
+                                        .spawn(
+                                            async move { controller.reload_config(&runtime_yaml) },
+                                        )
+                                        .await;
+                                    let _ = this.update(cx, |this, cx| {
+                                        this.auto_update_in_flight = None;
+                                        match result {
+                                            Ok(()) => {
+                                                log_info!(
+                                                    "profile",
+                                                    "新配置已热重载生效（内核未重启）"
+                                                );
+                                            }
+                                            Err(error) => {
+                                                log_warn!(
+                                                    "profile",
+                                                    "热重载失败，回退重启内核生效：{error:#}"
+                                                );
+                                                this.restart_core(cx);
+                                            }
+                                        }
+                                        cx.notify();
+                                    });
+                                })
+                                .detach();
+                            }
+                            None => {
+                                // 基线不可用导致没有 controller 时退回重启路径。
+                                log_warn!("profile", "controller 不可用，回退重启内核生效");
+                                this.restart_core(cx);
+                                this.auto_update_in_flight = None;
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        this.save_profiles();
+                        this.auto_update_in_flight = None;
+                        log_warn!("profile", "订阅自动更新失败（{name}，{host}）：{error:#}");
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// 打开某个订阅行的自动更新间隔编辑器；已在编辑或忙态时忽略。
+    fn edit_profile_interval(&mut self, index: usize, cx: &mut Context<Self>) {
+        // 添加表单打开时也忽略：两者共用同一个间隔输入实体，行内回填值
+        // 不应被随后的添加提交读到。
+        if self.profile_actions_locked() || self.profile_form_open {
+            return;
+        }
+        let Some(meta) = self.profiles.get(index) else {
+            return;
+        };
+        if meta.url.is_none() {
+            return;
+        }
+        self.editing_profile_index = Some(index);
+        let initial = if meta.update_interval_minutes == 0 {
+            String::new()
+        } else {
+            meta.update_interval_minutes.to_string()
+        };
+        self.profile_form_interval.update(cx, |input, cx| {
+            input.set_content(initial, cx);
+        });
+        self.profile_error = None;
+        cx.notify();
+    }
+
+    /// 保存行内编辑的自动更新间隔；非法输入给 profile_error 且保持编辑态。
+    fn save_profile_interval(&mut self, cx: &mut Context<Self>) {
+        let Some(index) = self.editing_profile_index else {
+            return;
+        };
+        let input = self
+            .profile_form_interval
+            .read(cx)
+            .content()
+            .trim()
+            .to_owned();
+        match profile::parse_update_interval(&input) {
+            Ok(minutes) => {
+                // 首次设置间隔且从未更新过时，以保存时刻为基准起算，
+                // 避免旧订阅立即到期触发一次意外更新。
+                let now = profile::now_secs();
+                if let Some(meta) = self.profiles.get_mut(index) {
+                    meta.update_interval_minutes = minutes;
+                    if minutes > 0 && meta.updated_at == 0 && meta.last_auto_attempt_at == 0 {
+                        meta.last_auto_attempt_at = now;
+                    }
+                }
+                self.save_profiles();
+                let name = self
+                    .profiles
+                    .get(index)
+                    .map(|meta| meta.name.clone())
+                    .unwrap_or_default();
+                log_info!(
+                    "profile",
+                    "{name} 自动更新间隔已设为{}",
+                    if minutes == 0 {
+                        "关闭".to_owned()
+                    } else {
+                        format!("{minutes} 分钟")
+                    }
+                );
+                self.editing_profile_index = None;
+                self.profile_error = None;
+            }
+            Err(error) => {
+                self.profile_error =
+                    Some(t!("profiles.interval_invalid", error = error.to_string()).into_owned());
+            }
+        }
+        cx.notify();
+    }
+
+    /// 取消行内间隔编辑，不落任何改动。
+    fn cancel_profile_interval_edit(&mut self, cx: &mut Context<Self>) {
+        if self.editing_profile_index.take().is_some() {
+            self.profile_error = None;
+            cx.notify();
+        }
+    }
+
     /// 删除配置；激活中的配置会同时回退到内置默认配置。
     fn delete_profile(&mut self, index: usize, cx: &mut Context<Self>) {
-        if self.profile_busy.is_some() {
+        if self.profile_actions_locked() {
             return;
         }
         let Some(meta) = self.profiles.get(index) else {
@@ -2068,7 +2453,7 @@ impl PureClash {
 
     /// 点击行激活配置：校验合并产物后写入 runtime.yaml，运行中则重启内核。
     fn activate_profile_clicked(&mut self, index: usize, cx: &mut Context<Self>) {
-        if self.profile_busy.is_some() {
+        if self.profile_actions_locked() {
             return;
         }
         let Some(meta) = self.profiles.get(index) else {
@@ -2126,7 +2511,7 @@ impl PureClash {
 
     /// 切回内置默认配置（仅 DIRECT）：与订阅激活同一条校验链路，成功后记录。
     fn activate_default_profile(&mut self, cx: &mut Context<Self>) {
-        if self.profile_busy.is_some() || self.active_profile.is_none() {
+        if self.profile_actions_locked() || self.active_profile.is_none() {
             return;
         }
         let version = self.config.mihomo_version.clone();

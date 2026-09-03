@@ -13,7 +13,7 @@ pub(super) fn render_profiles(
     palette: Palette,
     cx: &mut Context<PureClash>,
 ) -> AnyElement {
-    let busy = app.profile_busy.is_some();
+    let busy = app.profile_busy.is_some() || app.editing_profile_index.is_some();
     div()
         .p_6()
         .child(
@@ -86,12 +86,17 @@ pub(super) fn render_profiles(
                 .gap_3()
                 // 内置默认配置常驻首行：无激活订阅时即为选中态。
                 .child(default_profile_row(app, palette, cx))
-                .children(
-                    app.profiles
-                        .iter()
-                        .enumerate()
-                        .map(|(index, meta)| profile_row(app, index, meta, palette, cx)),
-                ),
+                .children({
+                    // 行内间隔编辑器紧跟被编辑的订阅行展开。
+                    let mut rows: Vec<AnyElement> = Vec::new();
+                    for (index, meta) in app.profiles.iter().enumerate() {
+                        rows.push(profile_row(app, index, meta, palette, cx));
+                        if app.editing_profile_index == Some(index) {
+                            rows.push(profile_interval_editor(app, palette, cx));
+                        }
+                    }
+                    rows
+                }),
         )
         .when(app.profiles.is_empty(), |page| {
             page.child(
@@ -170,6 +175,19 @@ fn render_profile_form(
                 .text_color(palette.text)
                 .line_height(px(20.))
                 .child(app.profile_form_url.clone()),
+        )
+        // 可选的自动更新间隔：留空或 0 表示关闭；非法值在提交时反馈。
+        .child(
+            div()
+                .p_2()
+                .rounded_sm()
+                .bg(palette.surface_alt)
+                .border_1()
+                .border_color(palette.border)
+                .text_sm()
+                .text_color(palette.text)
+                .line_height(px(20.))
+                .child(app.profile_form_interval.clone()),
         )
         .child(
             div()
@@ -379,12 +397,36 @@ fn profile_row(
     cx: &mut Context<PureClash>,
 ) -> AnyElement {
     let active = app.active_profile.as_deref() == Some(meta.id.as_str());
-    let busy = app.profile_busy.is_some();
+    // 行内编辑或后台自动更新进行中时锁定全部行的操作。
+    let busy = app.profile_busy.is_some()
+        || app.editing_profile_index.is_some()
+        || app.auto_update_in_flight.is_some();
     let source = if meta.url.is_some() {
         tr("profiles.source_subscription")
     } else {
         tr("profiles.source_local")
     };
+    // 副标题在“来源 · 更新时间”后追加自动更新状态。
+    let mut detail = t!(
+        "profiles.updated",
+        source = source.to_string(),
+        updated = format_profile_time(meta.updated_at).to_string()
+    )
+    .into_owned();
+    if meta.update_interval_minutes > 0 {
+        detail.push_str(" · ");
+        detail.push_str(
+            &t!(
+                "profiles.auto_interval",
+                interval = meta.update_interval_minutes.to_string()
+            )
+            .into_owned(),
+        );
+    }
+    if meta.last_auto_attempt_at > meta.updated_at {
+        detail.push_str(" · ");
+        detail.push_str(&tr("profiles.auto_failed"));
+    }
     div()
         .id(SharedString::from(format!("profile-{index}")))
         .min_h(px(76.0))
@@ -445,14 +487,11 @@ fn profile_row(
                         .child(meta.name.clone()),
                 )
                 .child(
-                    div().mt_1().text_xs().text_color(palette.muted).child(
-                        t!(
-                            "profiles.updated",
-                            source = source.to_string(),
-                            updated = format_profile_time(meta.updated_at).to_string()
-                        )
-                        .into_owned(),
-                    ),
+                    div()
+                        .mt_1()
+                        .text_xs()
+                        .text_color(palette.muted)
+                        .child(detail),
                 ),
         )
         .child(
@@ -477,6 +516,33 @@ fn profile_row(
                             .into_any_element(),
                     ]
                 })
+                // 订阅行额外提供自动更新间隔的行内编辑入口。
+                .children(meta.url.as_ref().map(|_| {
+                    div()
+                        .id(SharedString::from(format!("profile-edit-{index}")))
+                        .px_2()
+                        .h(px(26.0))
+                        .rounded_sm()
+                        .flex()
+                        .items_center()
+                        .map(|button| {
+                            if busy {
+                                button.opacity(0.5)
+                            } else {
+                                button.cursor_pointer()
+                            }
+                        })
+                        .bg(palette.surface_alt)
+                        .text_xs()
+                        .text_color(palette.muted)
+                        .child(tr("profiles.edit"))
+                        .on_click(
+                            cx.listener(move |this, _, _, cx| {
+                                this.edit_profile_interval(index, cx)
+                            }),
+                        )
+                        .into_any_element()
+                }))
                 .children(meta.url.as_ref().map(|_| {
                     div()
                         .id(SharedString::from(format!("profile-update-{index}")))
@@ -523,5 +589,89 @@ fn profile_row(
                 })),
         )
         .on_click(cx.listener(move |this, _, _, cx| this.activate_profile_clicked(index, cx)))
+        .into_any_element()
+}
+
+/// 订阅行的自动更新间隔行内编辑器：紧跟被编辑行展开，保存/取消二选一。
+fn profile_interval_editor(
+    app: &PureClash,
+    palette: Palette,
+    cx: &mut Context<PureClash>,
+) -> AnyElement {
+    div()
+        .id("profile-interval-editor")
+        .p_4()
+        .rounded_md()
+        .flex()
+        .flex_col()
+        .gap_2()
+        .bg(palette.surface)
+        .border_1()
+        .border_color(palette.accent)
+        .child(
+            div()
+                .text_sm()
+                .font_medium()
+                .text_color(palette.text)
+                .child(tr("profiles.interval_label")),
+        )
+        .child(
+            div()
+                .text_xs()
+                .text_color(palette.muted)
+                .child(tr("profiles.interval_hint")),
+        )
+        .child(
+            div()
+                .p_2()
+                .rounded_sm()
+                .bg(palette.surface_alt)
+                .border_1()
+                .border_color(palette.border)
+                .text_sm()
+                .text_color(palette.text)
+                .line_height(px(20.))
+                .child(app.profile_form_interval.clone()),
+        )
+        .child(
+            div()
+                .flex()
+                .gap_2()
+                .child(
+                    div()
+                        .id("profile-interval-save")
+                        .flex_1()
+                        .h(px(32.0))
+                        .rounded_sm()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .cursor_pointer()
+                        .bg(palette.accent)
+                        .text_xs()
+                        .font_medium()
+                        .text_color(palette.surface)
+                        .child(tr("profiles.interval_save"))
+                        .on_click(cx.listener(|this, _, _, cx| this.save_profile_interval(cx))),
+                )
+                .child(
+                    div()
+                        .id("profile-interval-cancel")
+                        .flex_1()
+                        .h(px(32.0))
+                        .rounded_sm()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .cursor_pointer()
+                        .bg(palette.surface_alt)
+                        .text_xs()
+                        .text_color(palette.muted)
+                        .child(tr("profiles.interval_cancel"))
+                        .on_click(
+                            cx.listener(|this, _, _, cx| this.cancel_profile_interval_edit(cx)),
+                        ),
+                ),
+        )
         .into_any_element()
 }

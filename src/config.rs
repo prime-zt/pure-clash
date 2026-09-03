@@ -78,6 +78,13 @@ pub(crate) struct ProfileMeta {
     pub(crate) added_at: u64,
     /// 最近一次内容更新时间（UNIX 秒）。
     pub(crate) updated_at: u64,
+    /// 自动更新间隔（分钟）；0 表示不自动更新（默认，兼容旧配置）。
+    #[serde(default)]
+    pub(crate) update_interval_minutes: u64,
+    /// 最近一次自动更新尝试（UNIX 秒，无论成败）；失败也记录以顺延到期，
+    /// 避免失败订阅每分钟到期被反复重试。
+    #[serde(default)]
+    pub(crate) last_auto_attempt_at: u64,
 }
 
 /// Pure Clash 主配置；新增字段必须提供默认值以兼容旧版配置文件。

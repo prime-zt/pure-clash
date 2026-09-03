@@ -78,7 +78,7 @@
 
 - Rust 2024 edition；GPUI 使用 Zed `v1.17.2` 对应提交 `c8e44cfa7bda9b2e22c8d6934d78969352e7f61a`，平台后端使用同提交的 `gpui_platform`；`rust-i18n = 4.2.1`；Windows 托盘使用 `tray-icon = 0.24.2`；unix 目标使用 `libc` 发送 SIGTERM 与设置父进程死亡信号；非 Windows 目标使用 `directories = 6.0` 解析标准用户目录。
 
-- 当前 Cargo 包版本为 `0.2.3`；正式发布标签必须使用匹配的 `v0.2.3`，否则发布流水线会拒绝构建。
+- 当前 Cargo 包版本为 `0.2.4`；正式发布标签必须使用匹配的 `v0.2.4`，否则发布流水线会拒绝构建。
 
 - UI、业务说明和代码注释使用中文；协议字段、类型名和函数名保留英文。
 
@@ -118,7 +118,7 @@
 
 - Windows 配置与数据继续存放在可执行文件同级的 `config/` 和 `data/`，主配置为 `config/app.json`；Mihomo 默认配置为 `config/mihomo/default.yaml`，运行数据目录为 `data/mihomo/`。安装目录必须对当前用户可写，NSIS per-user 安装符合该约束。Linux/macOS 预留使用 `directories` 提供的标准用户配置和数据目录，避免写入只读系统安装目录。
 
-- `default.yaml` 通过 `include_str!` 嵌入程序，只在目标文件缺失时创建，不得覆盖用户修改；默认监听本机 `127.0.0.1:7890`，启用 `unified-delay` 与 `tcp-concurrent`，策略组只有 Mihomo 内置 `DIRECT` 出站。这两个行为字段同时由本地基线强制注入所有 runtime，订阅不得关闭。设置页"强制匹配进程名"开关（`AppConfig.find_process_always`，存 app.json，是唯一事实来源）开启时本地基线向 runtime 注入 `find-process-mode: always`，关闭时不注入、保留订阅自带值（内核默认 strict 只在规则需要时查找进程，无 PROCESS 规则的订阅连接页进程名恒为空）；启动时把开关对齐到基线（local.yaml）再生成 runtime，切换开关走 `-t` 终审 + 基线/runtime 原子落盘事务，运行中的内核经 controller `PATCH /configs` 热切换（不重启、不断连），失败回滚 app.json。
+- `default.yaml` 通过 `include_str!` 嵌入程序，只在目标文件缺失时创建，不得覆盖用户修改；默认监听本机 `127.0.0.1:7890`，启用 `unified-delay` 与 `tcp-concurrent`，策略组只有 Mihomo 内置 `DIRECT` 出站。这两个行为字段同时由本地基线强制注入所有 runtime，订阅不得关闭。设置页"强制匹配进程名"开关（`AppConfig.find_process_always`，存 app.json，是唯一事实来源）开启时本地基线向 runtime 注入 `find-process-mode: always`，关闭时不注入、保留订阅自带值（内核默认 strict 只在规则需要时查找进程，无 PROCESS 规则的订阅连接页进程名恒为空）；启动时把开关对齐到基线（local.yaml）再生成 runtime，切换开关走 `-t` 终审 + 基线/runtime 原子落盘事务，运行中的内核经 controller `PATCH /configs` 热切换（不重启、不断连）；PATCH 异步失败时按切换前快照完整回滚四处状态（内存开关、app.json、local.yaml、runtime.yaml）并在设置页提示"已恢复原设置"，保证界面显示与内核实际运行模式一致。
 
 - 随包内核统一重命名为 `pc-mihomo`（Windows 为 `pc-mihomo.exe`），避免与其他代理客户端的 Mihomo 进程重名。内核文件随仓库提交：Windows 与 Linux x64 已入库，macOS 二进制暂不入库，需按 manifest 锁定的下载地址与 SHA-256 手动放置。macOS 资源根目录预留为 `.app/Contents/Resources/kernel`；Linux deb/rpm 将程序和资源安装到 `/opt/pure-clash`，AppImage 按可执行文件旁布局解析。Linux 自动补齐内核可执行位；macOS 要求文件预先具备可执行权限。
 
@@ -158,4 +158,8 @@
 
 - 页面借鉴 Clash Verge Rev 的功能分区，但采用独立的紧凑 GPUI 原生设计；页面保留内核开关、模式切换、代理节点与延迟测试、连接、配置和系统集成状态。
 
+- 订阅定时更新：`ProfileMeta.update_interval_minutes`（0=关闭，serde default 兼容旧 app.json；合法区间 10..=43200 分钟，debug 构建下限 1 分钟便于验证）与 `last_auto_attempt_at`（无论成败的最近尝试时间）存 app.json。到期判定 `profile::subscription_due`：`now >= max(updated_at, last_auto_attempt_at) + 间隔×60` 的墙钟比较——失败也顺延一个完整间隔防锤击，睡眠唤醒后立即补跑，时钟回拨只顺延；从未更新也从未尝试（base=0）视为到期。调度器 `spawn_profile_update_scheduler` 挂 PureClash 实体（与连接轮询同模式），主窗口关闭、`--autostart` 后台模式照常运行；首跳延迟 90 秒避开内核启动与代理自愈，之后每 60 秒一跳、每跳至多更新一个到期订阅，`profile_busy`/`auto_update_in_flight`/`CoreState::Starting` 任一成立即跳过本跳。自动更新与手动更新共用下载→`validate_and_store`（`-t` 终审、原子落盘）链路但静默执行（不占 profile\_busy、失败不弹界面错误，只在行副标题显示"上次自动更新失败"），下载期间配置被删除则按 id 定位自然丢弃。自动更新的应用策略三级递进（对齐 Clash Verge Rev）：① 下载内容与磁盘 profile 文件直接字符串比对（本地比较语义等同哈希且无碰撞），一致则只刷 updated\_at/last\_auto\_attempt\_at 并记日志，跳过落盘与 `-t` 终审、不动内核；② 有变更且命中激活订阅时写 runtime 后优先 controller `PUT /configs?force=true`（`payload` 字段直接携带 runtime YAML 内容，60s 超时——内核对 `path` 参数做 home/SAFE\_PATHS 安全校验，runtime 位于 `config/mihomo` 必被拒绝，payload 不受路径限制）进程内热重载——内核进程存活、既有连接不断开，v1.19.30 实测约 40ms；③ 热重载失败（或 controller 不可用）才回退 `restart_core` 整进程重启（系统代理托管不断、TUN 基线不变）；内核未运行（含启动中）只写 runtime，下次启动生效。互斥与成功标记时序：`auto_update_in_flight` 保持到应用真正结束（热重载完成或回退重启发起）才释放，热重载进行期间配置页全部动作锁定，避免晚到的热重载结果覆盖用户刚做的变更（回退重启后释放是安全的：runtime 已落盘，后续由 Starting 状态与启动代次机制接管）；`updated_at` 只在内容确定持久化后刷新——激活订阅写 runtime 失败时回滚 profile 文件（下载前读的旧内容原子写回，原本无文件则删除）并保留旧 updated\_at，否则下次到期会因下载内容与磁盘相同走跳过路径、旧 runtime 永远得不到修复。手动更新保持"写 runtime + 重启内核"的原语义不变。配置页动作互斥统一经 `profile_actions_locked`（手动忙态/行内编辑/自动更新进行中）；间隔可经添加表单的可选输入框直接设置（留空或 0 = 关闭，先于下载校验、非法值不触发下载）或订阅行内编辑器修改（复用同一 TextInput 实体，`set_content` 回填——因此添加表单打开时禁止打开行内编辑，避免回填值被添加提交读到），首次为从未更新的订阅设置间隔时以保存时刻为基准起算，避免立即触发一次意外更新。日志记 profile 标签、只含 host。
+
 - GPUI 仍处于 pre-1.0 阶段，升级前必须按目标版本官方示例核对 API。
+
+<br />

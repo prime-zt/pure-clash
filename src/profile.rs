@@ -175,6 +175,8 @@ pub(crate) fn subscription_meta(name: String, url: String) -> ProfileMeta {
         url: Some(url),
         added_at: now,
         updated_at: now,
+        update_interval_minutes: 0,
+        last_auto_attempt_at: 0,
     }
 }
 
@@ -187,12 +189,106 @@ pub(crate) fn local_meta(name: String) -> ProfileMeta {
         url: None,
         added_at: now,
         updated_at: now,
+        update_interval_minutes: 0,
+        last_auto_attempt_at: 0,
     }
+}
+
+/// 自动更新间隔下限（分钟）；更短的间隔对订阅服务器不友好。
+/// debug 构建放宽到 1 分钟便于真机快速验证调度链路。
+pub(crate) const MIN_UPDATE_INTERVAL_MINUTES: u64 = if cfg!(debug_assertions) { 1 } else { 10 };
+/// 自动更新间隔上限（分钟），30 天。
+pub(crate) const MAX_UPDATE_INTERVAL_MINUTES: u64 = 43_200;
+
+/// 解析用户输入的自动更新间隔：`0` 表示关闭，其余必须落在
+/// [`MIN_UPDATE_INTERVAL_MINUTES`]..=[`MAX_UPDATE_INTERVAL_MINUTES`]。
+pub(crate) fn parse_update_interval(input: &str) -> Result<u64> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Ok(0);
+    }
+    let minutes: u64 = trimmed
+        .parse()
+        .map_err(|_| anyhow::anyhow!("间隔必须是非负整数"))?;
+    if minutes == 0 {
+        return Ok(0);
+    }
+    if !(MIN_UPDATE_INTERVAL_MINUTES..=MAX_UPDATE_INTERVAL_MINUTES).contains(&minutes) {
+        bail!(
+            "间隔需在 {MIN_UPDATE_INTERVAL_MINUTES}..={MAX_UPDATE_INTERVAL_MINUTES} 分钟内，0 表示关闭"
+        );
+    }
+    Ok(minutes)
+}
+
+/// 订阅是否已到自动更新期：以「最近成功更新」与「最近尝试」的较晚者为基准
+/// 加间隔。墙钟比较让睡眠/休眠唤醒后立即补跑，时钟回拨只顺延不风暴。
+/// `now` 为当前 UNIX 秒。
+pub(crate) fn subscription_due(meta: &ProfileMeta, now: u64) -> bool {
+    let Some(_url) = meta.url.as_ref() else {
+        return false;
+    };
+    if meta.update_interval_minutes == 0 {
+        return false;
+    }
+    let base = meta.updated_at.max(meta.last_auto_attempt_at);
+    // base 为 0（从未更新过且从未尝试）时立即视为到期，启动后首跳即补跑。
+    now >= base.saturating_add(meta.update_interval_minutes * 60)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn due_meta(interval_minutes: u64, updated_at: u64, last_attempt: u64) -> ProfileMeta {
+        ProfileMeta {
+            id: "test".to_owned(),
+            name: "测试订阅".to_owned(),
+            url: Some("https://example.com/sub".to_owned()),
+            added_at: 0,
+            updated_at,
+            update_interval_minutes: interval_minutes,
+            last_auto_attempt_at: last_attempt,
+        }
+    }
+
+    #[test]
+    fn parse_update_interval_accepts_bounds_and_rejects_others() {
+        assert_eq!(parse_update_interval("").unwrap(), 0);
+        assert_eq!(parse_update_interval("0").unwrap(), 0);
+        assert_eq!(
+            parse_update_interval(&MIN_UPDATE_INTERVAL_MINUTES.to_string()).unwrap(),
+            MIN_UPDATE_INTERVAL_MINUTES
+        );
+        assert_eq!(
+            parse_update_interval(&MAX_UPDATE_INTERVAL_MINUTES.to_string()).unwrap(),
+            MAX_UPDATE_INTERVAL_MINUTES
+        );
+        assert_eq!(parse_update_interval(" 60 ").unwrap(), 60);
+        assert!(parse_update_interval("abc").is_err());
+        assert!(parse_update_interval("-1").is_err());
+        assert!(parse_update_interval("999999999").is_err());
+    }
+
+    #[test]
+    fn subscription_due_uses_latest_base() {
+        // 间隔以分钟计：60 分钟 = 3600 秒。
+        // 正常到期：updated_at(9000) + 3600 = 12600。
+        assert!(subscription_due(&due_meta(60, 9_000, 0), 12_600));
+        assert!(!subscription_due(&due_meta(60, 9_000, 0), 12_599));
+        // 失败顺延：尝试时间(9999)比成功更新更晚，到期 = 9999 + 3600 = 13599。
+        assert!(!subscription_due(&due_meta(60, 9_000, 9_999), 12_600));
+        assert!(subscription_due(&due_meta(60, 9_000, 9_999), 13_599));
+        // 关闭自动更新、本地导入（无 URL）永不到期。
+        assert!(!subscription_due(&due_meta(0, 0, 0), 1_000_000));
+        let mut local = due_meta(60, 0, 0);
+        local.url = None;
+        assert!(!subscription_due(&local, 1_000_000));
+        // 从未更新也从未尝试（base 为 0）：10 分钟间隔在 600 秒时到期，
+        // 启动后首跳即补跑错过的更新。
+        assert!(subscription_due(&due_meta(10, 0, 0), 600));
+        assert!(!subscription_due(&due_meta(10, 0, 0), 599));
+    }
 
     #[test]
     fn url_validation_accepts_only_http_forms() {
