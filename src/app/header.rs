@@ -105,7 +105,7 @@ fn render_page_header(
                 .child(header_status_toggle(
                     "header-tun",
                     tr("status.tun"),
-                    app.tun_running(),
+                    app.tun_switch_state(),
                     palette,
                     cx.listener(|this, _, _, cx| this.toggle_tun(cx)),
                 ))
@@ -165,10 +165,13 @@ fn page_subtitle(page: Page) -> SharedString {
 fn header_status_toggle(
     id: &'static str,
     label: SharedString,
-    enabled: bool,
+    state: impl Into<SwitchState>,
     palette: Palette,
     on_toggle: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> AnyElement {
+    let state = state.into();
+    let enabled = state == SwitchState::On;
+    let pending = state == SwitchState::Starting;
     div()
         .id(id)
         .h(px(28.0))
@@ -177,39 +180,41 @@ fn header_status_toggle(
         .flex()
         .items_center()
         .gap_2()
-        .cursor_pointer()
-        .hover(|style| style.bg(palette.surface_alt))
-        .bg(if enabled {
+        .when(!pending, |chip| {
+            chip.cursor_pointer()
+                .hover(|style| style.bg(palette.surface_alt))
+                .on_click(on_toggle)
+        })
+        .bg(if pending {
+            palette.accent_soft
+        } else if enabled {
             palette.success_soft
         } else {
             palette.surface
         })
         .border_1()
-        .border_color(if enabled {
+        .border_color(if pending {
+            palette.accent
+        } else if enabled {
             palette.success
         } else {
             palette.border
         })
         .text_xs()
-        .text_color(if enabled {
+        .text_color(if pending {
+            palette.accent
+        } else if enabled {
             palette.success
         } else {
             palette.muted
         })
-        .child(div().size_2().rounded_full().bg(if enabled {
+        .child(div().size_2().rounded_full().bg(if pending {
+            palette.accent
+        } else if enabled {
             palette.success
         } else {
             palette.border
         }))
-        .child(format!(
-            "{} {}",
-            label,
-            if enabled {
-                tr("status.on")
-            } else {
-                tr("status.off")
-            }
-        ))
-        .on_click(on_toggle)
+        .child(format!("{} {}", label, state.label()))
         .into_any_element()
 }

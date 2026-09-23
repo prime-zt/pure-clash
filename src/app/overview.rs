@@ -366,7 +366,9 @@ fn render_runtime_card(
         ))
         .child(info_line(
             tr("settings.tun"),
-            if app.tun_running() {
+            if app.tun_switch_state() == SwitchState::Starting {
+                tr("status.starting")
+            } else if app.tun_running() {
                 tr("overview.enabled")
             } else {
                 tr("overview.disabled")
@@ -390,7 +392,7 @@ fn render_runtime_card(
                 .child(action_button(
                     "runtime-tun",
                     tr("status.tun"),
-                    app.tun_running(),
+                    app.tun_switch_state(),
                     app.mihomo_running(),
                     palette,
                     cx.listener(|this, _, _, cx| this.toggle_tun(cx)),
@@ -402,12 +404,15 @@ fn render_runtime_card(
 fn action_button(
     id: &'static str,
     label: impl Into<SharedString>,
-    enabled: bool,
+    state: impl Into<SwitchState>,
     available: bool,
     palette: Palette,
     handler: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> AnyElement {
     let label = label.into();
+    let state = state.into();
+    let enabled = state == SwitchState::On;
+    let pending = state == SwitchState::Starting;
     div()
         .id(id)
         .h(px(30.0))
@@ -416,27 +421,38 @@ fn action_button(
         .flex()
         .items_center()
         .justify_center()
-        .cursor_pointer()
-        .opacity(if available { 1.0 } else { 0.5 })
-        .bg(if enabled {
+        .opacity(if available || pending { 1.0 } else { 0.5 })
+        .bg(if pending {
+            palette.accent_soft
+        } else if enabled {
             palette.success_soft
         } else {
             palette.surface_alt
         })
         .border_1()
-        .border_color(if enabled {
+        .border_color(if pending {
+            palette.accent
+        } else if enabled {
             palette.success
         } else {
             palette.border
         })
         .text_xs()
-        .text_color(if enabled {
+        .text_color(if pending {
+            palette.accent
+        } else if enabled {
             palette.success
         } else {
             palette.muted
         })
-        .child(label)
-        .on_click(handler)
+        .child(if pending {
+            SharedString::from(format!("{label} {}", state.label()))
+        } else {
+            label
+        })
+        .when(available && !pending, |button| {
+            button.cursor_pointer().on_click(handler)
+        })
         .into_any_element()
 }
 

@@ -31,6 +31,11 @@ use startup::StartupMode;
 use platform::{SingleInstance, SingleInstanceState};
 
 fn main() {
+    // Windows UAC 助手只管理内核和独立诊断日志，必须先于单实例与 GPUI 分流。
+    #[cfg(target_os = "windows")]
+    if let Some(code) = platform::windows::run_elevated_helper_if_requested() {
+        std::process::exit(code);
+    }
     // Linux TUN 服务安装器和 systemd 服务都会重新执行当前程序；
     // 必须在单实例锁、配置和 GPUI 初始化前分流，避免 root 进程触碰用户应用状态。
     #[cfg(target_os = "linux")]

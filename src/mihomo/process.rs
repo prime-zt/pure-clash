@@ -102,8 +102,8 @@ impl MihomoProcess {
         let mut guard = KernelProcessGuard::new()?;
         let mut log_pumps = Vec::new();
         let mut child = if elevated {
-            // 提权进程经 ShellExecuteExW(UAC)/systemd 服务创建，stdout 无法由
-            // 客户端捕获：Windows 无句柄继承、Linux 输出进入 journal。
+            // 提权进程由平台助手管理输出：Windows 写独立 tun-kernel.log，
+            // Linux systemd 服务的输出进入 journal，不与普通内核日志混写。
             let process = launch_elevated(
                 &executable,
                 &paths.mihomo_data_dir,
@@ -116,7 +116,7 @@ impl MihomoProcess {
             .context("无法以所需系统权限启动 Mihomo 内核")?;
             log_info!(
                 "kernel",
-                "提权内核已创建，输出不经客户端捕获（UAC/systemd journal）"
+                "提权内核管理进程已创建（Windows 输出见 log/tun-kernel.log，Linux 输出见 systemd journal）"
             );
             if let Err(error) = guard.attach_handle(process.handle()) {
                 // 提权进程已经创建，守护挂接失败时必须主动终止，不能只关闭句柄。

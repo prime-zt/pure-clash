@@ -46,7 +46,7 @@
 
 - `config/mihomo/default.yaml`：嵌入程序的首次启动默认配置，仅包含一个内置 `DIRECT` 节点。
 
-- `src/logging.rs`：零框架文件日志（`jiff` 仅提供本地时区时间戳）。运行日志 app.log 与内核日志 kernel.log 分文件、各自按大小轮转为 `.1`（1MB+3MB 单文件上限，磁盘合计约 8MB）；宏 `log_error!`/`log_warn!`/`log_info!`/`log_debug!` 以标签区分模块，所有消息写入前经 `redact` 脱敏（干净行零分配借用原文）；panic hook 记录 panic；初始化失败降级为空日志绝不阻断启动。写入路径按频率区分：app.log 低频用 `LineWriter` 逐行落盘保证崩溃诊断不丢尾，kernel.log 高频用 `BufWriter` 批量落盘（停止内核时等待泵线程排空并冲刷），轮转判断用累计字节计数而非每行查询文件元数据。
+- `src/logging.rs`：零框架文件日志（`jiff` 仅提供本地时区时间戳）。运行日志 app.log 与内核日志 kernel.log 分文件、各自按大小轮转为 `.1`（1MB+3MB 单文件上限）；Windows 另有逐行落盘的 tun-kernel.log（3MB×2），合计约 14MB；宏 `log_error!`/`log_warn!`/`log_info!`/`log_debug!` 以标签区分模块，所有消息写入前经 `redact` 脱敏（干净行零分配借用原文）；panic hook 记录 panic；初始化失败降级为空日志绝不阻断启动。写入路径按频率区分：app.log 低频用 `LineWriter` 逐行落盘保证崩溃诊断不丢尾，kernel.log 高频用 `BufWriter` 批量落盘（停止内核时等待泵线程排空并冲刷），轮转判断用累计字节计数而非每行查询文件元数据。
 
 - `src/profile.rs`：URL 订阅和本地配置文件的读取、大小/编码限制、结构校验、落盘与运行时配置同步管线。
 
@@ -78,7 +78,7 @@
 
 - Rust 2024 edition；GPUI 使用 Zed `v1.17.2` 对应提交 `c8e44cfa7bda9b2e22c8d6934d78969352e7f61a`，平台后端使用同提交的 `gpui_platform`；`rust-i18n = 4.2.1`；Windows 托盘使用 `tray-icon = 0.24.2`；unix 目标使用 `libc` 发送 SIGTERM 与设置父进程死亡信号；非 Windows 目标使用 `directories = 6.0` 解析标准用户目录。
 
-- 当前 Cargo 包版本为 `0.2.6`；正式发布标签必须使用匹配的 `v0.2.6`，否则发布流水线会拒绝构建。
+- 当前 Cargo 包版本为 `0.2.7`；正式发布标签必须使用匹配的 `v0.2.7`，否则发布流水线会拒绝构建。
 
 - UI、业务说明和代码注释使用中文；协议字段、类型名和函数名保留英文。
 
@@ -110,9 +110,11 @@
 
 - 客户端只接受本机 controller，不开放局域网控制；日志与诊断信息必须脱敏，不记录订阅 URL、认证头或 controller secret。
 
-- 日志分两个文件：`log/app.log` 记录客户端运行日志，`log/kernel.log` 记录普通内核的 stdout/stderr 原始输出；Windows 日志目录在可执行文件同级 `log/`，Linux 按 XDG 放 `~/.local/state/pure-clash/log/`（`AppPaths.log_dir` 统一解析，macOS 回退本地数据目录）。单文件超阈值（app 1MB、kernel 3MB）轮转为 `.1` 覆盖旧备份，磁盘占用合计约 8MB；打开文件时总是先把上一段归档，app.log 即本次会话、kernel.log 即当前内核的输出。日志在单实例判定后、配置加载前初始化，次实例不写日志；初始化失败降级为空日志，绝不阻断启动；panic hook 把 panic 落盘。所有消息（含内核行与 `-t` 校验失败详情）写入前经 `redact` 统一脱敏：URL 只保留 scheme+host（内嵌凭据与路径/查询丢弃），`secret=`/`token=`/`password=`/`authorization:` 的值掩码。插桩遵循单层记录（app 层记用户可见操作与结果，platform/mihomo 层只记内部细节）与边沿触发（运行配置和连接两条 controller 请求各自只在转坏/恢复时记一条）；日志宏标签统一用 app/core/kernel/proxy/tun/profile/tray/controller/geodata/autostart/update/panic。提权内核（Windows UAC / Linux systemd 服务）的 stdout 不经客户端捕获：app.log 记录生命周期与失败原因，Windows 提权内核输出不落 kernel.log，Linux TUN 内核输出在 systemd journal。
+- 日志分两个文件：`log/app.log` 记录客户端运行日志，`log/kernel.log` 记录普通内核的 stdout/stderr 原始输出；Windows 日志目录在可执行文件同级 `log/`，Linux 按 XDG 放 `~/.local/state/pure-clash/log/`（`AppPaths.log_dir` 统一解析，macOS 回退本地数据目录）。单文件超阈值（app 1MB、kernel 3MB）轮转为 `.1` 覆盖旧备份，磁盘占用合计约 8MB；打开文件时总是先把上一段归档，app.log 即本次会话、kernel.log 即当前内核的输出。日志在单实例判定后、配置加载前初始化，次实例不写日志；初始化失败降级为空日志，绝不阻断启动；panic hook 把 panic 落盘。所有消息（含内核行与 `-t` 校验失败详情）写入前经 `redact` 统一脱敏：URL 只保留 scheme+host（内嵌凭据与路径/查询丢弃），`secret=`/`token=`/`password=`/`authorization:` 的值掩码。插桩遵循单层记录（app 层记用户可见操作与结果，platform/mihomo 层只记内部细节）与边沿触发（运行配置和连接两条 controller 请求各自只在转坏/恢复时记一条）；日志宏标签统一用 app/core/kernel/proxy/tun/profile/tray/controller/geodata/autostart/update/panic。Windows 经 UAC 启动当前 EXE 的内部 `--run-elevated-kernel <版本>` 助手（先于单实例/GPUI 分流），只允许当前安装的版本目录和固定 runtime/data 路径；助手以独立 Job 守护内核，并把 stdout/stderr 脱敏后逐行写入 `log/tun-kernel.log`（3MB×2，Windows 日志总量约 14MB）。该文件单独轮转，自动回退普通内核不会覆盖 TUN 失败现场；记录 Windows build、IPv6 DisabledComponents、助手/内核 PID 和退出码，主程序记录 UAC 耗时、TUN 检查次数、耗时与 HTTP/解析错误，不记录完整配置。UAC 授权对象因此显示 Pure Clash，用户拒绝仍走原回退。Linux TUN 内核输出仍在 systemd journal。
 
 - 启动真实内核前先用目标版本的 Mihomo 校验配置；校验失败不得替换当前可用配置或重启正在工作的内核。
+
+- Windows TUN 在 controller 就绪后以单调时钟等待 30 秒，每轮间隔最多 300ms，成功即结束；初始化中的 tun.enable=false 不立即回退。其他平台等待窗口为 3 秒；窗口结束仍未生效才回退，末次 HTTP 请求最多再耗时 3 秒。等待日志每 5 秒记录一次进度，成功/错误变化立即记录；每次请求前后核对启动代次，停止或重启后及时结束旧探针。TUN 状态显式区分 Off/Starting/On：从 UAC 授权直到 controller 确认前统一显示“启动中…”，页头/标题栏/概览/设置/托盘同步，设置页开关居中呼吸且禁止重复点击；成功变为开启，取消、失败或停机清除过渡态（即使回退文件写入失败也不会卡住）。
 
 - 内核子进程的平台守护与终止统一经 `platform::KernelProcessGuard`（`new`/`prepare_command`/`attach`/`terminate`/Drop 约定）：Windows 用 Job Object 与 TerminateProcess，Linux 用 pdeathsig 与 SIGTERM→5 秒→SIGKILL，unix 内核独立成进程组。Windows 的 UAC `ShellExecuteExW(runas)` 必须在专用 STA 线程执行，禁止在 GPUI 实体更新回调中同步弹 UAC，以免 Shell 嵌套消息循环重入 `App`；启动结果带代次回传，过期进程必须立即回收。Linux 启动必须保持在长寿命线程（当前为 GPUI 主线程），避免创建子进程的短寿命线程退出触发 pdeathsig。macOS 仅预留进程组隔离与优雅终止，异常退出兑底在正式支持前单独实现。`mihomo` 模块不得直接依赖平台 API。
 
@@ -146,7 +148,7 @@
 
 - 托盘在 Windows 和 Linux 上提供一致体验：单击图标或菜单“打开”显示并激活主窗口，悬浮提示/状态文本按当前语言同步内核、系统代理和 TUN 的真实状态，并在相关开关变化后立即更新。主窗口关闭会真正销毁原生窗口及窗口渲染资源，但 `AppShell`、托盘、业务实体和内核继续运行；托盘菜单“打开”、第二实例唤起以及 macOS Dock reopen 会重新创建并激活窗口，托盘菜单“退出”先恢复系统代理、回收内核再真实结束应用。Linux 差异：SNI 桌面普遍把左键用于弹出菜单（KDE 等会触发 Activate）；GNOME 需要 AppIndicator 扩展，且顶栏不显示 tooltip，状态改由 SNI Title 承担；Wayland 依赖 xdg\_activation，部分合成器可能拒绝托盘来源的激活请求。
 
-- Windows/Linux 登录自启以平台真实状态为准，不写入 `app.json`：Windows 使用 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` 的 `PureClash` 值，Linux 使用 `$XDG_CONFIG_HOME/autostart/pure-clash.desktop`（缺省 `~/.config/autostart`），命令统一携带 `--autostart`。登录启动只省略主窗口，业务实体、托盘和内核仍必须启动；自启次实例静默退出，用户主动启动的次实例仍唤起首实例窗口。AppImage 必须优先记录运行时 `$APPIMAGE` 原始绝对路径，文件移动后需重新开关自启。后台模式托盘初始化失败时必须清理内核并退出，避免不可操作的隐形进程。Windows 恢复已配置 TUN 时允许弹 UAC；Linux 只经已安装且版本匹配的服务静默启动 TUN，服务不可用时关闭 TUN 配置并自动回退普通内核，不在登录阶段弹 polkit。TUN 状态只在内核运行且 controller 确认生效后显示开启，内核停止、启动中或失败时必须显示关闭。Windows 卸载器必须删除 Run 值；macOS 暂不实现登录自启。
+- Windows/Linux 登录自启以平台真实状态为准，不写入 `app.json`：Windows 使用 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` 的 `PureClash` 值，Linux 使用 `$XDG_CONFIG_HOME/autostart/pure-clash.desktop`（缺省 `~/.config/autostart`），命令统一携带 `--autostart`。登录启动只省略主窗口，业务实体、托盘和内核仍必须启动；自启次实例静默退出，用户主动启动的次实例仍唤起首实例窗口。AppImage 必须优先记录运行时 `$APPIMAGE` 原始绝对路径，文件移动后需重新开关自启。后台模式托盘初始化失败时必须清理内核并退出，避免不可操作的隐形进程。Windows 恢复已配置 TUN 时允许弹 UAC；Linux 只经已安装且版本匹配的服务静默启动 TUN，服务不可用时关闭 TUN 配置并自动回退普通内核，不在登录阶段弹 polkit。TUN 状态只在内核运行且 controller 确认生效后显示开启，TUN 授权和初始化期间显示启动中，内核停止或失败时显示关闭。Windows 卸载器必须删除 Run 值；macOS 暂不实现登录自启。
 
 - 当前用户会话只允许一个 Pure Clash 实例：Windows 用 `Local\\` 命名 Mutex + 自动重置 Event，Linux 用抽象命名空间 Unix socket（按 UID 隔离多用户，内核保证 bind 原子性，进程退出自动释放）；用户主动启动的后续进程通知首实例后于配置初始化和 GPUI 启动前退出，首实例把通知转交 GPUI 主线程恢复并激活主窗口，携带 `--autostart` 的后续进程则静默退出。macOS 尚未实现对应单实例锁。
 

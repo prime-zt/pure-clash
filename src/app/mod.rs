@@ -168,9 +168,37 @@ enum CoreState {
     Running,
 }
 
-/// TUN 状态展示的唯一判定：持久配置只表达启动意图，不能代替运行事实。
-fn tun_runtime_active(core_state: CoreState, controller_confirmed: bool) -> bool {
-    core_state == CoreState::Running && controller_confirmed
+/// 开关的可见状态；Starting 表示授权/内核初始化尚未完成，不等同于已开启。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SwitchState {
+    Off,
+    Starting,
+    On,
+}
+
+impl From<bool> for SwitchState {
+    fn from(enabled: bool) -> Self {
+        if enabled { Self::On } else { Self::Off }
+    }
+}
+
+impl SwitchState {
+    fn label(self) -> SharedString {
+        tr(match self {
+            Self::Off => "status.off",
+            Self::Starting => "status.starting",
+            Self::On => "status.on",
+        })
+    }
+}
+
+/// 停机后不得显示旧状态，内核启动阶段不得提前显示 TUN 已开启。
+fn tun_visible_state(core_state: CoreState, state: SwitchState) -> SwitchState {
+    match core_state {
+        CoreState::Stopped => SwitchState::Off,
+        CoreState::Starting if state != SwitchState::Off => SwitchState::Starting,
+        _ => state,
+    }
 }
 
 /// Windows 没有常驻提权服务，登录恢复 TUN 必须允许 UAC；Linux 登录阶段只允许
@@ -213,8 +241,8 @@ pub(crate) struct PureClash {
     system_proxy: bool,
     /// 本地基线中持久化的 TUN 期望值，决定下一次内核是否请求 TUN 权限。
     tun_configured: bool,
-    /// controller 已确认的当前 TUN 真实状态；内核未运行时必须为 false。
-    tun_effective: bool,
+    /// TUN 授权与初始化全过程的状态；只有 controller 确认后才进入 On。
+    tun_state: SwitchState,
     /// 登录自启状态始终来自平台配置，不复制到 `app.json`，避免与系统启动管理器分叉。
     autostart_enabled: bool,
     /// macOS 等尚未实现平台注册的平台显示禁用态，不能响应开关操作。
@@ -403,7 +431,7 @@ impl PureClash {
             system_proxy: false,
             // 配置期望与真实运行状态分离；只有 controller 确认后才显示 TUN 开启。
             tun_configured,
-            tun_effective: false,
+            tun_state: SwitchState::Off,
             autostart_enabled,
             autostart_available,
             // Windows 登录恢复 TUN 必须允许 UAC；Linux 已安装服务可在 false 时静默
@@ -464,7 +492,12 @@ impl PureClash {
     /// TUN 只有在内核运行且 controller 已确认时才算真正开启；持久配置本身
     /// 不能用于状态展示，避免启动中或启动失败时出现虚假开启。
     fn tun_running(&self) -> bool {
-        tun_runtime_active(self.core_state, self.tun_effective)
+        self.tun_switch_state() == SwitchState::On
+    }
+
+    /// 所有页面和托盘共用同一个可见状态，避免启动过程中显示为关闭。
+    fn tun_switch_state(&self) -> SwitchState {
+        tun_visible_state(self.core_state, self.tun_state)
     }
 
     /// 内核是否允许接受启停操作。
@@ -489,10 +522,10 @@ impl PureClash {
         } else {
             t!("tray.off")
         };
-        let tun = if self.tun_running() {
-            t!("tray.on")
-        } else {
-            t!("tray.off")
+        let tun = match self.tun_switch_state() {
+            SwitchState::On => t!("tray.on"),
+            SwitchState::Starting => t!("status.starting"),
+            SwitchState::Off => t!("tray.off"),
         };
         TrayTexts {
             tooltip: t!(
@@ -778,7 +811,11 @@ impl PureClash {
         self.core_start_generation = self.core_start_generation.wrapping_add(1);
         let generation = self.core_start_generation;
         self.core_state = CoreState::Starting;
-        self.tun_effective = false;
+        self.tun_state = if self.tun_configured {
+            SwitchState::Starting
+        } else {
+            SwitchState::Off
+        };
         self.mihomo_error = None;
         cx.notify();
 
@@ -878,6 +915,7 @@ impl PureClash {
             Err(error) => {
                 self.mihomo_process = None;
                 self.core_state = CoreState::Stopped;
+                self.tun_state = SwitchState::Off;
                 // 提权启动被拒绝（用户取消 UAC/polkit）或校验失败时，回退关闭 TUN
                 // 并以普通权限重新拉起内核，保证用户始终有可用代理。
                 if self.tun_configured {
@@ -922,34 +960,84 @@ impl PureClash {
         };
         cx.spawn(async move |this, cx| {
             let background = cx.background_executor().clone();
-            let timer = background.clone();
-            let check = background.spawn(async move {
-                // controller 监听可能早于 TUN 初始化完成，短暂轮询内核的真实状态。
-                for _ in 0..10 {
-                    if let Ok(config) = controller.configs()
-                        && config.tun_enabled
-                    {
-                        return Ok(());
+            let result = async {
+                // Windows 首次创建 Wintun 网卡可能超过 3 秒；初始化中返回的
+                // tun.enable=false 不能立即判为失败。用单调时钟给足 30 秒，
+                // 避免按次数重试时把每次 HTTP 超时叠加成数分钟；其他平台保持 3 秒。
+                // 不记录完整响应，避免配置中的敏感字段进入日志。
+                let started = std::time::Instant::now();
+                let timeout = std::time::Duration::from_secs(if cfg!(target_os = "windows") {
+                    30
+                } else {
+                    3
+                });
+                let mut attempt = 0;
+                let mut last_log = std::time::Duration::ZERO;
+                let mut last_error = None;
+                log_info!("tun", "开始确认 TUN 状态（启动代次 {generation}，等待窗口 {} 秒，间隔 300ms）", timeout.as_secs());
+                while started.elapsed() < timeout {
+                    // 每轮检查代次：停止或切换配置后及时结束旧探针，避免等待期内
+                    // 多个探针对新内核重复请求或写入误导日志。
+                    let active = this.update(cx, |this, _| {
+                        generation == this.core_start_generation && this.tun_state == SwitchState::Starting
+                    }).unwrap_or(false);
+                    if !active { return Ok(()); }
+                    attempt += 1;
+                    let controller = controller.clone();
+                    let snapshot = background.spawn(async move { controller.configs() }).await;
+                    let active = this.update(cx, |this, _| {
+                        generation == this.core_start_generation && this.tun_state == SwitchState::Starting
+                    }).unwrap_or(false);
+                    if !active { return Ok(()); }
+                    let elapsed = started.elapsed();
+                    let log_progress = attempt == 1 || elapsed.saturating_sub(last_log) >= std::time::Duration::from_secs(5);
+                    match snapshot {
+                        Ok(config) => {
+                            // 持续等待每 5 秒留一条进度，成功/错误恢复立即记录。
+                            let recovered = last_error.take().is_some();
+                            if config.tun_enabled || log_progress || recovered {
+                                log_info!("tun", "TUN 状态检查 #{attempt}（代次 {generation}，累计 {}ms）：tun.enable={}", elapsed.as_millis(), config.tun_enabled);
+                                last_log = elapsed;
+                            }
+                            if config.tun_enabled {
+                                return Ok(());
+                            }
+                        }
+                        Err(error) => {
+                            let error = format!("{error:#}");
+                            if log_progress || last_error.as_ref() != Some(&error) {
+                                log_warn!("tun", "TUN 状态检查 #{attempt}（代次 {generation}，累计 {}ms）请求失败：{error}", elapsed.as_millis());
+                                last_log = elapsed;
+                            }
+                            last_error = Some(error);
+                        }
                     }
-                    timer.timer(std::time::Duration::from_millis(300)).await;
+                    // 不在窗口尾部多等一次完整间隔；正在进行的 HTTP 请求仍受
+                    // controller 的 3 秒超时约束，最坏总时长约为窗口加一次请求。
+                    let remaining = timeout.saturating_sub(started.elapsed());
+                    if !remaining.is_zero() {
+                        background.timer(remaining.min(std::time::Duration::from_millis(300))).await;
+                    }
                 }
+                log_warn!("tun", "TUN 确认窗口结束（代次 {generation}，累计 {}ms），Windows 初始化错误请检查 log/tun-kernel.log", started.elapsed().as_millis());
                 anyhow::bail!("Mihomo controller 未确认 TUN 已生效")
-            });
-            let result = check.await;
+            }.await;
             let _ = this.update(cx, |this, cx| {
-                if generation != this.core_start_generation {
+                if generation != this.core_start_generation || this.tun_state != SwitchState::Starting {
                     return;
                 }
                 let Err(error) = result else {
                     // 只有 controller 明确返回开启，界面和托盘才显示 TUN 已生效。
                     log_info!("tun", "controller 确认 TUN 已生效");
-                    this.tun_effective = true;
+                    this.tun_state = SwitchState::On;
                     cx.notify();
                     return;
                 };
                 if !this.tun_configured {
                     return;
                 }
+                // 即使回退文件写入失败，也结束过渡态，允许用户重试。
+                this.tun_state = SwitchState::Off;
                 // 回退事务会校验并原子写入关闭 TUN 的配置，运行中自动重启内核。
                 log_warn!("tun", "controller 未确认 TUN 生效，自动回退关闭：{error:#}");
                 let message = tun_reverted_error(&error);
@@ -1396,7 +1484,7 @@ impl PureClash {
         let stop_result = self.mihomo_process.take().map(|mut process| process.stop());
 
         self.core_state = CoreState::Stopped;
-        self.tun_effective = false;
+        self.tun_state = SwitchState::Off;
         if let Some(Err(error)) = stop_result {
             let detail = concise_error(&format!("{error:#}"), 240);
             log_error!("core", "停止 Mihomo 失败：{error:#}");
@@ -1494,9 +1582,9 @@ impl PureClash {
     /// 开关 TUN：写入本地基线并重新合并校验；内核运行中自动重启生效。
     ///
     /// TUN 由内核承载，内核未运行时不允许开启（与系统代理约束一致）；
-    /// 关闭随时允许，只写基线、下次启动生效。
+    /// 授权和初始化期间不接受重复切换，仍可通过停止内核中止运行。
     fn toggle_tun(&mut self, cx: &mut Context<Self>) {
-        if !self.core_operable() {
+        if !self.core_operable() || self.tun_switch_state() == SwitchState::Starting {
             return;
         }
         let enabled = !self.tun_configured;
@@ -1560,7 +1648,7 @@ impl PureClash {
         self.baseline = Some(desired);
         self.tun_configured = enabled;
         // 配置提交不等于系统能力已经生效；重启后由 controller 再确认。
-        self.tun_effective = false;
+        self.tun_state = SwitchState::Off;
         if self.core_active() {
             self.restart_core(cx);
         }
@@ -3013,10 +3101,36 @@ mod tests {
 
     #[test]
     fn tun_status_requires_running_core_and_controller_confirmation() {
-        assert!(!tun_runtime_active(CoreState::Stopped, true));
-        assert!(!tun_runtime_active(CoreState::Starting, true));
-        assert!(!tun_runtime_active(CoreState::Running, false));
-        assert!(tun_runtime_active(CoreState::Running, true));
+        // 授权中、controller 已就绪但网卡仍初始化中都显示过渡态；确认才显示开启。
+        assert_eq!(
+            tun_visible_state(CoreState::Starting, SwitchState::Starting),
+            SwitchState::Starting
+        );
+        assert_eq!(
+            tun_visible_state(CoreState::Running, SwitchState::Starting),
+            SwitchState::Starting
+        );
+        assert_eq!(
+            tun_visible_state(CoreState::Running, SwitchState::On),
+            SwitchState::On
+        );
+        assert_eq!(
+            tun_visible_state(CoreState::Starting, SwitchState::On),
+            SwitchState::Starting
+        );
+        // 失败回退和手动停止后，即使有过期状态也不得卡在启动中或显示已开启。
+        for state in [SwitchState::Off, SwitchState::Starting, SwitchState::On] {
+            assert_eq!(
+                tun_visible_state(CoreState::Stopped, state),
+                SwitchState::Off
+            );
+        }
+        assert_eq!(
+            tun_visible_state(CoreState::Running, SwitchState::Off),
+            SwitchState::Off
+        );
+        assert_eq!(t!("status.starting", locale = "zh-CN"), "启动中…");
+        assert_eq!(t!("status.starting", locale = "en-US"), "Starting…");
     }
 
     #[test]

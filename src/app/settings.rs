@@ -1,6 +1,6 @@
 //! 设置页：内核与系统代理、界面语言、主题与运行目录信息。
 
-use gpui::{AnyElement, Context, SharedString, Styled, div, px};
+use gpui::{Animation, AnimationExt, AnyElement, Context, SharedString, Styled, div, px};
 
 use super::overview::integration_error_banner;
 use super::*;
@@ -56,9 +56,13 @@ pub(super) fn render_settings(
                 .child(setting_row(
                     "setting-tun",
                     tr("settings.tun"),
-                    tr("settings.tun_detail"),
-                    app.tun_running(),
-                    true,
+                    if app.tun_switch_state() == SwitchState::Starting {
+                        tr("settings.tun_starting_detail")
+                    } else {
+                        tr("settings.tun_detail")
+                    },
+                    app.tun_switch_state(),
+                    app.core_operable(),
                     palette,
                     cx.listener(|this, _, _, cx| this.toggle_tun(cx)),
                 ))
@@ -228,13 +232,33 @@ fn setting_row(
     id: &'static str,
     title: impl Into<SharedString>,
     detail: impl Into<SharedString>,
-    enabled: bool,
+    state: impl Into<SwitchState>,
     available: bool,
     palette: Palette,
     handler: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> AnyElement {
     let title = title.into();
     let detail = detail.into();
+    let state = state.into();
+    let enabled = state == SwitchState::On;
+    let pending = state == SwitchState::Starting;
+    // 启动中保持文案可读，用居中的呼吸滑块表达过渡；不注册点击事件。
+    let thumb = div().size_4().rounded_full().bg(palette.surface);
+    let thumb = if pending {
+        thumb
+            .with_animation(
+                "tun-starting-thumb",
+                Animation::new(std::time::Duration::from_millis(1200))
+                    .repeat()
+                    .with_max_fps(20.0),
+                |thumb, progress| {
+                    thumb.opacity(0.55 + 0.45 * (progress * std::f32::consts::TAU).cos().abs())
+                },
+            )
+            .into_any_element()
+    } else {
+        thumb.into_any_element()
+    };
     div()
         .min_h(px(62.0))
         .flex()
@@ -242,7 +266,7 @@ fn setting_row(
         .gap_3()
         .border_b_1()
         .border_color(palette.border)
-        .opacity(if available { 1.0 } else { 0.5 })
+        .opacity(if available || pending { 1.0 } else { 0.5 })
         .child(
             div()
                 .flex_1()
@@ -261,6 +285,14 @@ fn setting_row(
                         .child(detail),
                 ),
         )
+        .when(pending, |row| {
+            row.child(
+                div()
+                    .text_xs()
+                    .text_color(palette.accent)
+                    .child(state.label()),
+            )
+        })
         .child(
             div()
                 .id(id)
@@ -270,15 +302,16 @@ fn setting_row(
                 .rounded_full()
                 .flex()
                 .items_center()
-                .bg(if enabled {
+                .bg(if pending || enabled {
                     palette.accent
                 } else {
                     palette.border
                 })
+                .when(pending, |toggle| toggle.justify_center())
                 .when(enabled, |toggle| toggle.justify_end())
-                .when(!enabled, |toggle| toggle.justify_start())
-                .child(div().size_4().rounded_full().bg(palette.surface))
-                .when(available, |toggle| {
+                .when(!pending && !enabled, |toggle| toggle.justify_start())
+                .child(thumb)
+                .when(available && !pending, |toggle| {
                     toggle.cursor_pointer().on_click(handler)
                 }),
         )

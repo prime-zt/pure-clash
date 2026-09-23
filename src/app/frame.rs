@@ -280,7 +280,7 @@ pub(super) fn render_titlebar(
         ))
         .child(system_flag_pill(
             tr("status.tun"),
-            app.tun_running(),
+            app.tun_switch_state(),
             palette,
         ))
         .child(language_button(app.config.language, palette, cx))
@@ -440,8 +440,17 @@ fn core_status(app: &PureClash, palette: Palette) -> AnyElement {
 }
 
 /// 标题栏的系统代理 / TUN 状态徽标：与内核状态同款胶囊样式。
-fn system_flag_pill(label: SharedString, enabled: bool, palette: Palette) -> AnyElement {
-    let (color, dot) = if enabled {
+fn system_flag_pill(
+    label: SharedString,
+    state: impl Into<SwitchState>,
+    palette: Palette,
+) -> AnyElement {
+    let state = state.into();
+    let enabled = state == SwitchState::On;
+    let pending = state == SwitchState::Starting;
+    let (color, dot) = if pending {
+        (palette.accent, palette.accent)
+    } else if enabled {
         (palette.success, palette.success)
     } else {
         (palette.muted, palette.muted)
@@ -454,7 +463,9 @@ fn system_flag_pill(label: SharedString, enabled: bool, palette: Palette) -> Any
         .flex()
         .items_center()
         .gap_2()
-        .bg(if enabled {
+        .bg(if pending {
+            palette.accent_soft
+        } else if enabled {
             palette.success_soft
         } else {
             palette.surface_alt
@@ -463,10 +474,7 @@ fn system_flag_pill(label: SharedString, enabled: bool, palette: Palette) -> Any
         .font_medium()
         .text_color(color)
         .child(div().size_2().rounded_full().bg(dot))
-        .child(format!(
-            "{label} {}",
-            tr(if enabled { "status.on" } else { "status.off" })
-        ))
+        .child(format!("{label} {}", state.label()))
         .into_any_element()
 }
 

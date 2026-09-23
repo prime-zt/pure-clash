@@ -6,7 +6,8 @@
 //! controller secret 不得进入任何日志文件（见 AGENTS.md 红线）。
 //!
 //! 磁盘占用有确定上界：每个文件超过阈值即轮转为 `.1`（覆盖旧备份），
-//! app.log 1MB×2 + kernel.log 3MB×2 合计约 8MB，低于 10MB 预算。
+//! app.log 1MB×2 + kernel.log 3MB×2；Windows 另有 tun-kernel.log 3MB×2，
+//! 专门保留提权内核的诊断输出，避免失败回退后被普通内核覆盖。
 //!
 //! 写入路径按频率区别对待：app.log 低频且是崩溃诊断的依据，逐行落盘；
 //! kernel.log 承接内核 info 级每条连接一行的输出，用缓冲批量落盘并把
@@ -214,6 +215,34 @@ fn replace_rotated_file(path: &Path, rotated_path: &Path) -> std::io::Result<()>
 /// 关键生命周期记录；同样按大小轮转并脱敏。
 pub(crate) struct KernelLogWriter {
     sink: Mutex<LogSink<BufWriter<File>>>,
+}
+
+/// Windows 提权助手独占的诊断日志；逐行冲刷，确保被强制回收前的报错已落盘。
+/// 与普通内核分文件轮转，自动回退不会覆盖失败现场；所有输出仍统一脱敏。
+#[cfg(target_os = "windows")]
+pub(crate) struct TunLogWriter {
+    sink: Mutex<LogSink<LineWriter<File>>>,
+}
+
+#[cfg(target_os = "windows")]
+impl TunLogWriter {
+    pub(crate) fn open(log_dir: &Path) -> Option<Arc<Self>> {
+        let sink = open_sink(
+            log_dir,
+            "tun-kernel.log",
+            KERNEL_LOG_MAX_BYTES,
+            LineWriter::new,
+        )?;
+        Some(Arc::new(Self {
+            sink: Mutex::new(sink),
+        }))
+    }
+
+    /// `source` 标记 helper/stdout/stderr；`message` 为单行诊断内容，不传完整配置。
+    pub(crate) fn write_line(&self, source: &str, message: &str) {
+        let mut sink = self.sink.lock().unwrap_or_else(|error| error.into_inner());
+        sink.write_line(&format!("{} [{}] {}", timestamp(), source, redact(message)));
+    }
 }
 
 impl KernelLogWriter {
