@@ -30,7 +30,7 @@ Currently available for Windows x64 and Linux x64 (Wayland / X11); macOS keeps d
 - **System proxy** — Windows writes the current user's Internet Settings and broadcasts via WinINet; Linux supports GNOME/Cinnamon sessions through `gsettings`. The user's original settings are saved atomically before enabling and restored on disable, core stop or crash recovery
 - **TUN mode** — Windows elevates only the kernel via UAC and uses the bundled wintun; Linux follows the Clash Verge Rev service model: a one-time `pkexec` installs a root systemd service, afterwards start/stop goes through a UID-restricted IPC and never asks for the password again; TUN automatically reverts when it does not take effect
 - **Desktop integration** — tray icon with live multi-language status, single-instance lock, close-to-tray, dark/light themes and a Chinese/English interface
-- **Minimal memory footprint** — the desktop client itself typically stays under 50 MB of memory (excluding the Mihomo kernel)
+- **Minimal memory footprint** — the desktop client itself typically stays under 30 MB of memory (excluding the Mihomo kernel)
 
 ## Pages
 
@@ -53,9 +53,10 @@ Linux uses XDG directories (`~/.config/pure-clash`, `~/.local/share/pure-clash`)
 
 ## Tested environments
 
-Real-world verification so far covers only the two setups below; other Windows versions, distros and desktop environments are untested, and feedback is welcome:
+Actual verification has been completed in the following environments so far. Feedback is welcome
 
-- Windows 11 x64 (MSVC build)
+- Windows 11 x64
+- Windows 10 x64
 - Fedora 44 x64 (Wayland / GNOME)
 
 ## Getting started

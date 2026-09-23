@@ -30,7 +30,7 @@ Pure Clash 用清晰、快速的原生界面管理配置订阅、代理组、连
 - **系统代理**：Windows 写入当前用户 Internet Settings 并经 WinINet 广播生效；Linux 支持 GNOME/Cinnamon 会话（`gsettings`）。开启前原子保存用户原设置，关闭、停内核或异常退出后自动还原
 - **TUN 模式**：Windows 经 UAC 提权内核并使用随包 wintun；Linux 参考 Clash Verge Rev 服务模型，首次 `pkexec` 安装 root systemd 服务，此后按 UID 隔离 IPC 启停不再重复授权；TUN 未真实生效时自动回退并提示原因
 - **系统集成**：托盘图标（状态多语言同步）、单实例锁、关闭到托盘、深浅色主题与中英文界面
-- **极低内存占用**：桌面客户端自身内存通常在 50 MB 以内（不含 Mihomo 内核）
+- **极低内存占用**：桌面客户端自身内存通常在 30 MB 以内，常驻后降到个位数
 
 ## 界面
 
@@ -53,9 +53,10 @@ Linux 使用 XDG 标准目录（`~/.config/pure-clash`、`~/.local/share/pure-cl
 
 ## 测试覆盖
 
-目前只在以下两个环境完成过实际验证，其他 Windows 版本、发行版与桌面环境未经测试，欢迎反馈：
+目前在以下环境完成过实际验证，欢迎反馈：
 
-- Windows 11 x64（MSVC 构建）
+- Windows 11 x64
+- Windows 10 x64
 - Fedora 44 x64（Wayland / GNOME）
 
 ## 快速开始
