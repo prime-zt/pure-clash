@@ -109,6 +109,9 @@ pub(crate) struct AppConfig {
     pub(crate) profiles: Vec<ProfileMeta>,
     /// 当前激活的配置 id；None 表示使用内置默认配置。
     pub(crate) active_profile: Option<String>,
+    /// 手动节点选择：键为完整分组名，值为完整节点名（包括 GLOBAL）；默认空映射。
+    /// 跨重启及订阅更新复用同名分组，节点消失时临时使用该组第一项。
+    pub(crate) selected_nodes: std::collections::BTreeMap<String, String>,
 }
 
 impl Default for AppConfig {
@@ -121,6 +124,7 @@ impl Default for AppConfig {
             find_process_always: false,
             profiles: Vec::new(),
             active_profile: None,
+            selected_nodes: Default::default(),
         }
     }
 }
@@ -338,6 +342,26 @@ mod tests {
         assert_eq!(reloaded.config.mihomo_version, "test-version");
 
         fs::remove_dir_all(root).expect("应清理测试目录");
+    }
+
+    #[test]
+    fn selected_nodes_survive_config_save_and_legacy_defaults() {
+        // 旧配置无需迁移；按完整名称保存，中文与特殊字符都必须无损回读。
+        let mut config: AppConfig = serde_json::from_str("{}").unwrap();
+        assert!(config.selected_nodes.is_empty());
+        config
+            .selected_nodes
+            .insert("GLOBAL".into(), "香港 / 01".into());
+        config
+            .selected_nodes
+            .insert("代理选择".into(), "日本 #2".into());
+        let root = test_dir("selected-nodes");
+        fs::create_dir_all(&root).unwrap();
+        let file = root.join("app.json");
+        config.save(&file).unwrap();
+        let restored: AppConfig = serde_json::from_str(&fs::read_to_string(file).unwrap()).unwrap();
+        assert_eq!(restored.selected_nodes, config.selected_nodes);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

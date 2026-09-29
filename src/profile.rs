@@ -556,6 +556,7 @@ mod tests {
         fs::create_dir_all(&paths.profiles_dir).expect("应创建 profiles 目录");
 
         let baseline = LocalBaseline {
+            mode: crate::mihomo::controller::Mode::Rule,
             mixed_port: 17890,
             controller_addr: "127.0.0.1:19098".to_owned(),
             secret: "activate-secret".to_owned(),

@@ -80,9 +80,13 @@ pub(super) fn render_proxies(
     palette: Palette,
     cx: &mut Context<PureClash>,
 ) -> AnyElement {
-    let mode_available = app.mihomo_running();
+    // 配置更新与模式切换共用互斥，避免热重载把新模式覆盖回旧值。
+    let mode_available = app.mihomo_running() && !app.profile_actions_locked();
     div()
         .p_6()
+        .when_some(app.proxy_error.as_ref(), |page, error| {
+            page.child(super::overview::integration_error_banner(error, palette))
+        })
         .child(
             div()
                 .p_4()
@@ -103,28 +107,69 @@ pub(super) fn render_proxies(
                         ))
                         .child(
                             div()
-                                .id("proxies-refresh")
-                                .px_3()
-                                .h(px(28.0))
-                                .rounded_sm()
                                 .flex()
                                 .items_center()
-                                .map(|button| {
-                                    if mode_available {
-                                        button.cursor_pointer()
-                                    } else {
-                                        button.opacity(0.5)
-                                    }
-                                })
-                                .bg(palette.surface_alt)
-                                .text_xs()
-                                .text_color(palette.muted)
-                                .child(tr("proxy.refresh"))
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    if this.mihomo_running() {
-                                        this.fetch_runtime_state(cx);
-                                    }
-                                })),
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .id("proxies-sort")
+                                        .px_3()
+                                        .h(px(28.0))
+                                        .rounded_sm()
+                                        .flex()
+                                        .items_center()
+                                        .whitespace_nowrap()
+                                        .cursor_pointer()
+                                        .bg(if app.node_sort_by_delay {
+                                            palette.accent_soft
+                                        } else {
+                                            palette.surface_alt
+                                        })
+                                        .text_xs()
+                                        .text_color(if app.node_sort_by_delay {
+                                            palette.accent
+                                        } else {
+                                            palette.muted
+                                        })
+                                        .child(tr(if app.node_sort_by_delay {
+                                            "proxy.sort_delay"
+                                        } else {
+                                            "proxy.sort_default"
+                                        }))
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            // 只切换展示方式，保留分组展开状态、已加载数量和当前选择。
+                                            this.node_sort_by_delay = !this.node_sort_by_delay;
+                                            cx.notify();
+                                        })),
+                                )
+                                .child(
+                                    div()
+                                        .id("proxies-refresh")
+                                        .px_3()
+                                        .h(px(28.0))
+                                        .rounded_sm()
+                                        .flex()
+                                        .items_center()
+                                        .map(|button| {
+                                            if mode_available {
+                                                button.cursor_pointer()
+                                            } else {
+                                                button.opacity(0.5)
+                                            }
+                                        })
+                                        .bg(palette.surface_alt)
+                                        .text_xs()
+                                        .text_color(palette.muted)
+                                        .child(tr("proxy.refresh"))
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            if this.mihomo_running()
+                                                && !this.profile_actions_locked()
+                                            {
+                                                this.proxy_error = None;
+                                                this.fetch_runtime_state(cx);
+                                            }
+                                        })),
+                                ),
                         ),
                 )
                 .child(
@@ -383,24 +428,25 @@ fn proxy_group_panel(
         // “显示更多”加载，单次布局量有硬上界，滚动只保留页面一层。
         .children(expanded.then(|| {
             let rendered = rendered.min(group.nodes.len());
+            // 先对整个分组排序再分页，确保最快节点即使原本在后续页也能显示在首页。
+            let indices = ordered_node_indices(&group.nodes, app.node_sort_by_delay, |node| {
+                app.node_delay(node).flatten()
+            });
             let mut list = div().mt_3().child(
                 // 所有节点共用等宽列（minmax(0, 1fr)），避免逐行 Flex 被长名称
                 // 撑宽；末行不足三项时仍与上方列对齐，不拉伸剩余卡片。
                 div().grid().grid_cols(PROXY_NODE_COLUMNS).gap_2().children(
-                    group.nodes[..rendered]
-                        .iter()
-                        .enumerate()
-                        .map(|(node_index, node)| {
-                            proxy_node_row(
-                                group_index,
-                                node_index,
-                                node,
-                                group.now.as_str(),
-                                app,
-                                palette,
-                                cx,
-                            )
-                        }),
+                    indices.into_iter().take(rendered).map(|node_index| {
+                        proxy_node_row(
+                            group_index,
+                            node_index,
+                            &group.nodes[node_index],
+                            group.now.as_str(),
+                            app,
+                            palette,
+                            cx,
+                        )
+                    }),
                 ),
             );
             if rendered < group.nodes.len() {
@@ -428,6 +474,25 @@ fn proxy_group_panel(
             list
         }))
         .into_any_element()
+}
+
+/// 生成展示用的原始下标，避免排序改变节点点击目标、持久化选择或缺失节点回退顺序。
+/// 有效延迟升序；未知/超时置后，同延迟与未知节点均保持配置原序。
+fn ordered_node_indices(
+    nodes: &[NodeSnapshot],
+    by_delay: bool,
+    delay: impl Fn(&NodeSnapshot) -> Option<u64>,
+) -> Vec<usize> {
+    let mut indices: Vec<_> = (0..nodes.len()).collect();
+    if by_delay {
+        indices.sort_by_key(
+            |&index| match delay(&nodes[index]).filter(|&value| value > 0) {
+                Some(value) => (false, value),
+                None => (true, 0),
+            },
+        );
+    }
+    indices
 }
 
 fn proxy_node_row(
@@ -572,6 +637,39 @@ mod tests {
                 })
                 .collect(),
         }
+    }
+
+    #[test]
+    fn delay_sort_preserves_node_identity_and_default_order() {
+        let mut group = proxy_group("测试", 6);
+        for (node, delay) in
+            group
+                .nodes
+                .iter_mut()
+                .zip([None, Some(200), Some(50), Some(0), Some(50), Some(10)])
+        {
+            node.delay = delay;
+        }
+        let sorted = ordered_node_indices(&group.nodes, true, |node| node.delay);
+        assert_eq!(sorted, [5, 2, 4, 1, 0, 3]);
+        // 分页在排序之后截取，点击仍使用原始下标，不能把第一张卡误当成节点0。
+        assert_eq!(group.nodes[sorted[0]].name, "节点5");
+        assert_eq!(&sorted[..3], &[5, 2, 4]);
+        assert_eq!(
+            ordered_node_indices(&group.nodes, false, |_| None),
+            [0, 1, 2, 3, 4, 5]
+        );
+        // 最新测速失败应覆盖历史快值，原本最快的节点随结果变化移到末尾。
+        assert_eq!(
+            ordered_node_indices(&group.nodes, true, |node| {
+                if node.name == "节点5" {
+                    None
+                } else {
+                    node.delay
+                }
+            }),
+            [2, 4, 1, 0, 3, 5]
+        );
     }
 
     #[test]

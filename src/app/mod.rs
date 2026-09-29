@@ -252,6 +252,12 @@ pub(crate) struct PureClash {
     interactive_elevation_allowed: bool,
     /// 运行模式；与 controller 同步，未运行时保持上次已知值。
     mode: ProxyMode,
+    /// 模式切换串行执行，避免异步请求乱序覆盖已保存的选择。
+    mode_switching: bool,
+    /// 节点切换与配置更新互斥，防止旧请求结果写入新配置。
+    node_switching: bool,
+    /// 模式或节点操作失败时，在代理页提示用户。
+    proxy_error: Option<String>,
     /// controller 返回的真实策略组快照；内核未运行时为空。
     groups: Vec<GroupSnapshot>,
     /// 运行配置请求失败边沿标记；与连接轮询独立，避免一条请求吞掉另一条日志。
@@ -303,6 +309,8 @@ pub(crate) struct PureClash {
     geodata_status: Option<SharedString>,
     /// 代理页数据拉取中。
     proxies_loading: bool,
+    /// 节点展示是否按延迟升序；默认保持内核返回的配置顺序，仅影响当前会话界面。
+    node_sort_by_delay: bool,
     /// 分组手动折叠状态（组名 → 是否展开）；未记录的组按节点数自动决定。
     group_expanded: std::collections::HashMap<String, bool>,
     /// 分组已翻页渲染的节点数（组名 → 数量）；未记录的组只渲染首页。
@@ -437,7 +445,11 @@ impl PureClash {
             // Windows 登录恢复 TUN 必须允许 UAC；Linux 已安装服务可在 false 时静默
             // 启动，服务不可用则回退普通内核，不在登录阶段弹 polkit。
             interactive_elevation_allowed: startup_allows_interactive_elevation(startup_mode),
-            mode: ProxyMode::Rule,
+            // controller 尚未就绪时也展示上次保存的选择。
+            mode: ProxyMode::from_controller(baseline.as_ref().map_or(Mode::Rule, |b| b.mode)),
+            mode_switching: false,
+            node_switching: false,
+            proxy_error: None,
             groups: Vec::new(),
             runtime_state_failing: false,
             connections_failing: false,
@@ -466,6 +478,7 @@ impl PureClash {
             geodata_updating: false,
             geodata_status: None,
             proxies_loading: false,
+            node_sort_by_delay: false,
             group_expanded: std::collections::HashMap::new(),
             group_page: std::collections::HashMap::new(),
             node_endpoints: std::collections::HashMap::new(),
@@ -1135,14 +1148,21 @@ impl PureClash {
 
     /// 后台拉取运行模式与代理组；内核未运行时忽略。
     fn fetch_runtime_state(&mut self, cx: &mut Context<Self>) {
+        if !self.mihomo_running() || self.proxies_loading || self.node_switching {
+            return;
+        }
         let Some(controller) = self.controller() else {
             return;
         };
         let runtime_config = self.paths.runtime_mihomo_config_file.clone();
+        let selections = self.config.selected_nodes.clone();
+        let generation = self.core_start_generation;
         self.proxies_loading = true;
         cx.notify();
         cx.spawn(async move |this, cx| {
             let snapshot = cx.background_executor().spawn(async move {
+                // 客户端持久化不依赖内核 cache.db，普通内核和 Linux TUN 服务均适用。
+                controller.restore_proxy_selections(&selections)?;
                 let config = controller.configs()?;
                 let mut proxies = controller.proxies(config.mode)?;
                 // controller 返回无序映射，分组按订阅定义顺序展示。
@@ -1156,6 +1176,9 @@ impl PureClash {
             });
             let result = snapshot.await;
             let _ = this.update(cx, |this, cx| {
+                if generation != this.core_start_generation || !this.mihomo_running() {
+                    return;
+                }
                 this.proxies_loading = false;
                 match result {
                     Ok((config, proxies, endpoints)) => {
@@ -1168,6 +1191,7 @@ impl PureClash {
                         }
                     }
                     Err(error) => {
+                        this.proxy_error = Some(t!("proxy.nodes_restore_failed").into_owned());
                         // 每秒轮询失败只做边沿记录：从成功转入失败记一条 warn，
                         // 恢复时记一条 info，避免刷屏。
                         if !this.runtime_state_failing {
@@ -1497,6 +1521,7 @@ impl PureClash {
         // 内核停止后在线数据不再有效；TUN 的回退由真实停机路径（toggle_core/
         // 启动失败回退）显式调用 revert_tun，配置切换重启不在此处处理。
         self.groups.clear();
+        self.proxies_loading = false;
         self.connections.clear();
         self.traffic_down_speed = 0;
         self.traffic_up_speed = 0;
@@ -1781,43 +1806,102 @@ impl PureClash {
         Ok(())
     }
 
-    /// 切换运行模式：先经 controller 生效，成功后才更新本地状态。
+    /// 保存模式到基线和运行时配置；写入失败保留原基线，供用户重试。
+    fn save_mode_configuration(&mut self, mode: Mode) -> anyhow::Result<()> {
+        let previous = self
+            .baseline
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("本地基线不可用"))?;
+        let mut desired = previous.clone();
+        desired.mode = mode;
+        // 沿用配置合并和同版本内核 -t 校验，保证重启与订阅更新行为一致。
+        let runtime = profile::prepare_runtime(
+            &self.paths,
+            Some(&desired),
+            &self.config.mihomo_version,
+            self.active_profile.as_deref(),
+        )?;
+        save_baseline(&self.paths, &desired)?;
+        if let Err(error) = write_runtime(&self.paths, &runtime) {
+            return match save_baseline(&self.paths, &previous) {
+                Ok(()) => Err(error),
+                Err(rollback_error) => Err(anyhow::anyhow!(
+                    "{error:#}；恢复原本地基线也失败：{rollback_error:#}"
+                )),
+            };
+        }
+        self.baseline = Some(desired);
+        Ok(())
+    }
+
+    /// 先热切换内核，成功后记住选择；失败不覆盖上次保存的模式。
     fn set_mode(&mut self, mode: ProxyMode, cx: &mut Context<Self>) {
-        if !self.mihomo_running() || mode == self.mode {
+        if !self.mihomo_running()
+            || self.profile_actions_locked()
+            || (mode == self.mode
+                && self
+                    .baseline
+                    .as_ref()
+                    .is_some_and(|b| b.mode == mode.to_controller()))
+        {
             return;
         }
         let Some(controller) = self.controller() else {
             return;
         };
+        self.mode_switching = true;
+        self.proxy_error = None;
+        let generation = self.core_start_generation;
+        cx.notify();
         cx.spawn(async move |this, cx| {
             let target = mode.to_controller();
             let result = cx
                 .background_executor()
                 .spawn(async move { controller.patch_mode(target.as_str()) })
                 .await;
-            let _ = this.update(cx, |this, cx| match result {
-                Ok(()) => {
-                    this.mode = mode;
-                    // GLOBAL 组的可见性随模式变化，重新拉取分组。
-                    this.fetch_runtime_state(cx);
+            let _ = this.update(cx, |this, cx| {
+                this.mode_switching = false;
+                cx.notify();
+                // 停机或重启后的旧请求不能保存为新内核的用户选择。
+                if generation != this.core_start_generation || !this.mihomo_running() {
+                    return;
                 }
-                Err(error) => {
-                    log_warn!("proxy", "切换运行模式失败：{error:#}");
+                match result {
+                    Ok(()) => {
+                        this.mode = mode;
+                        if let Err(error) = this.save_mode_configuration(target) {
+                            log_warn!("proxy", "运行模式已生效，但保存失败：{error:#}");
+                            this.proxy_error = Some(t!("proxy.mode_save_failed").into_owned());
+                        }
+                        // GLOBAL 组的可见性随模式变化，重新拉取分组。
+                        this.fetch_runtime_state(cx);
+                    }
+                    Err(error) => {
+                        log_warn!("proxy", "切换运行模式失败：{error:#}");
+                        this.proxy_error = Some(t!("proxy.mode_switch_failed").into_owned());
+                    }
                 }
             });
         })
         .detach();
     }
 
-    /// 在策略组中选择节点：乐观更新界面，后台提交 controller，失败回拉。
+    /// 内核确认选择成功后立即持久化完整分组名和节点名，失败不覆盖旧记录。
     fn select_node(&mut self, group_index: usize, node_index: usize, cx: &mut Context<Self>) {
+        if self.profile_actions_locked() || !self.mihomo_running() {
+            return;
+        }
         let Some(group) = self.groups.get(group_index) else {
             return;
         };
         let Some(node) = group.nodes.get(node_index) else {
             return;
         };
-        if !group.selectable || group.now == node.name || !self.mihomo_running() {
+        if !group.selectable
+            || (group.now == node.name
+                && self.config.selected_nodes.get(&group.name) == Some(&node.name)
+                && self.proxy_error.is_none())
+        {
             return;
         }
         let group_name = group.name.clone();
@@ -1826,25 +1910,51 @@ impl PureClash {
             return;
         };
 
-        if let Some(group) = self.groups.get_mut(group_index) {
-            group.now = node_name.clone();
-        }
+        self.node_switching = true;
+        self.proxy_error = None;
+        let generation = self.core_start_generation;
         cx.notify();
 
         cx.spawn(async move |this, cx| {
-            let log_group = group_name.clone();
-            let log_node = node_name.clone();
+            let selected_group = group_name.clone();
+            let selected_node = node_name.clone();
             let result = cx
                 .background_executor()
                 .spawn(async move { controller.select_proxy(&group_name, &node_name) })
                 .await;
-            if let Err(error) = result {
-                log_warn!(
-                    "proxy",
-                    "选择节点失败（{log_group} → {log_node}）：{error:#}"
-                );
-                let _ = this.update(cx, |this, cx| this.fetch_runtime_state(cx));
-            }
+            let _ = this.update(cx, |this, cx| {
+                this.node_switching = false;
+                cx.notify();
+                if generation != this.core_start_generation || !this.mihomo_running() {
+                    // 新内核可能在旧请求返回前已就绪，需要补拉取被忙态跳过的快照。
+                    this.fetch_runtime_state(cx);
+                    return;
+                }
+                match result {
+                    Ok(()) => {
+                        if let Some(group) = this
+                            .groups
+                            .iter_mut()
+                            .find(|group| group.name == selected_group)
+                        {
+                            group.now = selected_node.clone();
+                        }
+                        // 保存失败仍保留当前会话的选择，并允许再次点击当前节点重试落盘。
+                        this.config
+                            .selected_nodes
+                            .insert(selected_group, selected_node);
+                        if let Err(error) = this.config.save(&this.paths.config_file) {
+                            log_warn!("proxy", "节点已切换，但保存选择失败：{error:#}");
+                            this.proxy_error = Some(t!("proxy.node_save_failed").into_owned());
+                        }
+                    }
+                    Err(error) => {
+                        log_warn!("proxy", "选择节点失败：{error:#}");
+                        this.proxy_error = Some(t!("proxy.node_switch_failed").into_owned());
+                        this.fetch_runtime_state(cx);
+                    }
+                }
+            });
         })
         .detach();
     }
@@ -1890,10 +2000,13 @@ impl PureClash {
         cx.notify();
     }
 
-    /// 配置页动作互斥锁：手动忙态、行内编辑或后台自动更新进行中时，
+    /// 配置页动作互斥锁：模式/节点切换与恢复、手动忙态、行内编辑或自动更新进行中时，
     /// 暂停其他会修改配置列表 / profile 文件的操作，避免并发写与下标漂移。
     fn profile_actions_locked(&self) -> bool {
-        self.profile_busy.is_some()
+        self.mode_switching
+            || self.node_switching
+            || self.proxies_loading
+            || self.profile_busy.is_some()
             || self.editing_profile_index.is_some()
             || self.auto_update_in_flight.is_some()
     }
@@ -2369,6 +2482,7 @@ impl PureClash {
                                                     "profile",
                                                     "新配置已热重载生效（内核未重启）"
                                                 );
+                                                this.fetch_runtime_state(cx);
                                             }
                                             Err(error) => {
                                                 log_warn!(

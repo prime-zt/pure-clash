@@ -1,4 +1,11 @@
 _version: 1
+proxy.sort_default: "Default order"
+proxy.sort_delay: "Latency ↑"
+proxy.node_save_failed: "Node changed but could not be saved. Click the current node to retry."
+proxy.node_switch_failed: "Could not change node. Your last choice is unchanged. Please retry."
+proxy.nodes_restore_failed: "Could not load or restore node selections. Click Refresh to retry."
+proxy.mode_save_failed: "Mode changed but could not be saved. The previous mode may return on restart. Click the current mode to retry."
+proxy.mode_switch_failed: "Could not change mode. Your last saved choice is unchanged. Please retry."
 page.overview: "Overview"
 page.proxies: "Proxies"
 page.connections: "Connections"

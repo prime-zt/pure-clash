@@ -162,6 +162,28 @@ impl Controller {
         })
     }
 
+    /// 恢复客户端记录的选择；`selections` 为完整分组名到节点名的映射。
+    /// 节点不存在时选择该组第一项；空组、自动组、未记录的组不修改。
+    /// 返回成功表示全部需要修改的组已提交；HTTP 失败立即返回错误供重试。
+    pub(crate) fn restore_proxy_selections(
+        &self,
+        selections: &BTreeMap<String, String>,
+    ) -> Result<()> {
+        if selections.is_empty() {
+            return Ok(());
+        }
+        // 即使处于规则模式，也恢复隐藏的 GLOBAL 组，保证切到全局后沿用选择。
+        for group in self.proxies(Mode::Global)?.groups {
+            if let Some(saved) = selections.get(&group.name)
+                && let Some(target) = group.restored_node(saved)
+                && group.now != target
+            {
+                self.select_proxy(&group.name, target)?;
+            }
+        }
+        Ok(())
+    }
+
     /// 在策略组内选择当前节点；只对 Selector 组有效。
     pub(crate) fn select_proxy(&self, group: &str, node: &str) -> Result<()> {
         self.agent
@@ -299,8 +321,11 @@ impl Controller {
 /// 运行模式；与 controller 的 `mode` 字段一一对应。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Mode {
+    /// 按配置规则分流，也是默认模式。
     Rule,
+    /// 所有请求使用 GLOBAL 策略组。
     Global,
+    /// 所有请求直接连接。
     Direct,
 }
 
@@ -540,6 +565,20 @@ pub(crate) struct GroupSnapshot {
     pub(crate) nodes: Vec<NodeSnapshot>,
 }
 
+impl GroupSnapshot {
+    /// 按完整名称恢复手动选择；不按下标或延迟匹配，避免排序变化后选错节点。
+    fn restored_node(&self, saved: &str) -> Option<&str> {
+        if !self.selectable {
+            return None;
+        }
+        self.nodes
+            .iter()
+            .find(|node| node.name == saved)
+            .or_else(|| self.nodes.first())
+            .map(|node| node.name.as_str())
+    }
+}
+
 /// 代理节点快照。
 #[derive(Clone, Debug)]
 pub(crate) struct NodeSnapshot {
@@ -600,6 +639,128 @@ mod tests {
         }
         // 未知值回退到规则模式。
         assert_eq!(Mode::from_str("unknown"), Mode::Rule);
+    }
+
+    #[test]
+    fn node_restoration_matches_names_and_only_falls_back_when_missing() {
+        let mut group = GroupSnapshot {
+            name: "代理选择".into(),
+            now: "第一项".into(),
+            selectable: true,
+            nodes: ["第一项", "香港 / 01", "日本 #2"]
+                .into_iter()
+                .map(|name| NodeSnapshot {
+                    name: name.into(),
+                    kind: "Shadowsocks".into(),
+                    delay: None,
+                })
+                .collect(),
+        };
+        // 即使节点没有测速结果或列表顺序改变，也恢复同名节点，不擅自切换。
+        assert_eq!(group.restored_node("香港 / 01"), Some("香港 / 01"));
+        group.nodes.reverse();
+        assert_eq!(group.restored_node("香港 / 01"), Some("香港 / 01"));
+        assert_eq!(group.restored_node("已删除"), Some("日本 #2"));
+        group.selectable = false;
+        assert_eq!(group.restored_node("香港 / 01"), None);
+        group.selectable = true;
+        group.nodes.clear();
+        assert_eq!(group.restored_node("香港 / 01"), None);
+    }
+
+    #[test]
+    #[ignore = "使用随包 Mihomo 验证重启及热重载后的节点恢复；仅监听临时回环 controller"]
+    fn restores_saved_nodes_with_real_kernel_without_native_cache() {
+        use crate::{
+            config::AppConfig,
+            mihomo::{MihomoProcess, config::ensure_baseline},
+            platform::AppPaths,
+        };
+        use std::{fs, net::TcpListener, path::PathBuf};
+
+        let root =
+            std::env::temp_dir().join(format!("pure-clash-node-restore-{}", uuid::Uuid::new_v4()));
+        let mut paths = AppPaths::portable(&root);
+        paths.kernel_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("kernel");
+        fs::create_dir_all(&paths.mihomo_config_dir).unwrap();
+        fs::create_dir_all(&paths.mihomo_data_dir).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        drop(listener);
+        let mut baseline = ensure_baseline(&paths).unwrap();
+        baseline.controller_addr = address.to_string();
+        let controller = Controller::new(&baseline);
+        // 禁用内核缓存、代理端口、DNS 与 TUN，单独验证客户端恢复且不影响用户网络。
+        let runtime = format!(
+            "mixed-port: 0\nexternal-controller: {address}\nsecret: {}\nmode: rule\nprofile:\n  store-selected: false\nproxy-groups:\n- name: 手动组\n  type: select\n  proxies: [DIRECT, REJECT]\nrules:\n- MATCH,DIRECT\n",
+            baseline.secret
+        );
+        fs::write(&paths.runtime_mihomo_config_file, &runtime).unwrap();
+        let start = || {
+            let process = MihomoProcess::start(
+                &paths,
+                env!("PURE_CLASH_DEFAULT_MIHOMO_VERSION"),
+                &paths.runtime_mihomo_config_file,
+                false,
+                true,
+            )
+            .unwrap();
+            for _ in 0..50 {
+                if controller.version().is_ok() {
+                    return process;
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            panic!("测试 controller 未就绪");
+        };
+        let selected = |name: &str| {
+            controller
+                .proxies(Mode::Global)
+                .unwrap()
+                .groups
+                .into_iter()
+                .find(|group| group.name == name)
+                .unwrap()
+                .now
+        };
+        let mut process = start();
+        let mut config = AppConfig::default();
+        for name in ["手动组", "GLOBAL"] {
+            controller.select_proxy(name, "REJECT").unwrap();
+            config.selected_nodes.insert(name.into(), "REJECT".into());
+        }
+        config
+            .selected_nodes
+            .insert("已删除的分组".into(), "不存在的节点".into());
+        config.save(&paths.config_file).unwrap();
+        process.stop().unwrap();
+
+        // 重启后从 app.json 回读选择；此时内核原始默认值是第一项 DIRECT。
+        let restored: AppConfig =
+            serde_json::from_str(&fs::read_to_string(&paths.config_file).unwrap()).unwrap();
+        let mut process = start();
+        assert_eq!(selected("手动组"), "DIRECT");
+        controller
+            .restore_proxy_selections(&restored.selected_nodes)
+            .unwrap();
+        assert_eq!(selected("手动组"), "REJECT");
+        assert_eq!(selected("GLOBAL"), "REJECT");
+
+        // 订阅更新删除选中节点时回退首项，但不覆盖记忆，节点重新出现后仍可恢复。
+        controller
+            .reload_config(&runtime.replace("[DIRECT, REJECT]", "[DIRECT]"))
+            .unwrap();
+        controller
+            .restore_proxy_selections(&restored.selected_nodes)
+            .unwrap();
+        assert_eq!(selected("手动组"), "DIRECT");
+        controller.reload_config(&runtime).unwrap();
+        controller
+            .restore_proxy_selections(&restored.selected_nodes)
+            .unwrap();
+        assert_eq!(selected("手动组"), "REJECT");
+        process.stop().unwrap();
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

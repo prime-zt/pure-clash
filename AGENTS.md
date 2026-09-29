@@ -78,7 +78,7 @@
 
 - Rust 2024 edition；GPUI 使用 Zed `v1.17.2` 对应提交 `c8e44cfa7bda9b2e22c8d6934d78969352e7f61a`，平台后端使用同提交的 `gpui_platform`；`rust-i18n = 4.2.1`；Windows 托盘使用 `tray-icon = 0.24.2`；unix 目标使用 `libc` 发送 SIGTERM 与设置父进程死亡信号；非 Windows 目标使用 `directories = 6.0` 解析标准用户目录。
 
-- 当前 Cargo 包版本为 `0.2.7`；正式发布标签必须使用匹配的 `v0.2.7`，否则发布流水线会拒绝构建。
+- 当前 Cargo 包版本为 `0.2.8`；正式发布标签必须使用匹配的 `v0.2.8`，否则发布流水线会拒绝构建。
 
 - UI、业务说明和代码注释使用中文；协议字段、类型名和函数名保留英文。
 
@@ -109,6 +109,8 @@
 - Mihomo 作为独立 sidecar 运行；Pure Clash 通过仅监听 loopback 的 REST/WebSocket external controller 通信，并为每次安装生成高强度随机 secret。
 
 - 客户端只接受本机 controller，不开放局域网控制；日志与诊断信息必须脱敏，不记录订阅 URL、认证头或 controller secret。
+
+- 用户运行模式（规则/全局/直连）保存在 `config/mihomo/local.yaml` 的 `mode` 字段，以 `LocalBaseline.mode` 为准，缺失或未知值回退规则模式。controller 切换成功后经合并、内核 `-t` 校验和原子写入同步基线/runtime；失败保留原保存值并在代理页提示。应用启动、内核重启、订阅切换与更新均沿用该模式，订阅不能覆盖用户选择；切换请求串行执行并与订阅更新互斥，忽略已停止或重启内核的过期结果。
 
 - 日志分两个文件：`log/app.log` 记录客户端运行日志，`log/kernel.log` 记录普通内核的 stdout/stderr 原始输出；Windows 日志目录在可执行文件同级 `log/`，Linux 按 XDG 放 `~/.local/state/pure-clash/log/`（`AppPaths.log_dir` 统一解析，macOS 回退本地数据目录）。单文件超阈值（app 1MB、kernel 3MB）轮转为 `.1` 覆盖旧备份，磁盘占用合计约 8MB；打开文件时总是先把上一段归档，app.log 即本次会话、kernel.log 即当前内核的输出。日志在单实例判定后、配置加载前初始化，次实例不写日志；初始化失败降级为空日志，绝不阻断启动；panic hook 把 panic 落盘。所有消息（含内核行与 `-t` 校验失败详情）写入前经 `redact` 统一脱敏：URL 只保留 scheme+host（内嵌凭据与路径/查询丢弃），`secret=`/`token=`/`password=`/`authorization:` 的值掩码。插桩遵循单层记录（app 层记用户可见操作与结果，platform/mihomo 层只记内部细节）与边沿触发（运行配置和连接两条 controller 请求各自只在转坏/恢复时记一条）；日志宏标签统一用 app/core/kernel/proxy/tun/profile/tray/controller/geodata/autostart/update/panic。Windows 经 UAC 启动当前 EXE 的内部 `--run-elevated-kernel <版本>` 助手（先于单实例/GPUI 分流），只允许当前安装的版本目录和固定 runtime/data 路径；助手以独立 Job 守护内核，并把 stdout/stderr 脱敏后逐行写入 `log/tun-kernel.log`（3MB×2，Windows 日志总量约 14MB）。该文件单独轮转，自动回退普通内核不会覆盖 TUN 失败现场；记录 Windows build、IPv6 DisabledComponents、助手/内核 PID 和退出码，主程序记录 UAC 耗时、TUN 检查次数、耗时与 HTTP/解析错误，不记录完整配置。UAC 授权对象因此显示 Pure Clash，用户拒绝仍走原回退。Linux TUN 内核输出仍在 systemd journal。
 
@@ -161,6 +163,10 @@
 - 页面上的内核启动/停止已接入真实 Mihomo 进程；启动固定使用 `config/mihomo/runtime.yaml` 和 `data/mihomo/`，并先以同一内核执行 `-t`。应用启动时按 `app.json` 记录的激活配置自动拉起内核；runtime 合并、`-t` 或原子提交任一步失败时保留旧文件且不得启动/重启内核，profile 激活态只在 runtime 提交成功后更新。runtime.yaml 由客户端本地基线 `config/mihomo/local.yaml`（含随机 controller secret，禁止写入日志）与激活的配置文件合并生成，端口等本机字段一律以本地基线为准，订阅不得开启 TUN。配置页首行是内置默认配置（仅 `DIRECT` 出站，`active_profile` 为空即选中态，点击经同一 `-t` 链路切回），其下支持 URL 订阅下载以及 GPUI 原生文件选择器导入本地 YAML；两种来源共用结构预检、同版本内核 `-t`、原子保存与激活链路，远程订阅另支持更新，所有配置均可删除与切换。导入只保存内容副本，不记录源路径或复制其相对引用资源。激活/切换配置会真实重启内核；代理页与运行模式切换通过仅回环的 external controller（`PATCH /configs`、`GET/PUT /proxies`）真实生效，节点/分组延迟测试用 `GET /proxies/{name}/delay` 与 `GET /group/{name}/delay`（gstatic 204 探测、5 秒超时，手动结果覆盖 /proxies 历史值，失败显示超时）。连接与流量为真实实现：应用常驻任务每秒轮询 `GET /connections`，差分累计字节数得到实时网速，连接列表支持单条与全部关闭（`DELETE /connections[/{id}]`），渲染上限 200 行；响应中 `connections` 可为 null、失败延迟记为 0，解析时均已兜底，接口字段以官方文档和内核实测为准。设置页展示真实 controller 地址；系统代理与 TUN 开关为真实实现，标题栏以同款徽标展示两者开关状态。
 
 - 页面借鉴 Clash Verge Rev 的功能分区，但采用独立的紧凑 GPUI 原生设计；页面保留内核开关、模式切换、代理节点与延迟测试、连接、配置和系统集成状态。
+
+- 代理页刷新旁的排序按钮切换默认顺序/延迟升序，作用于各分组内部，当前会话有效。延迟取界面当前测速结果（手动结果优先），未知、测速中与超时节点置后，同延迟保持原序；先全组排序再分页。只排序展示下标，不修改分组快照，因此点击、已选节点及找不到历史节点时的首项回退仍按原配置身份/顺序处理。
+
+- 手动节点选择在 controller 成功后写入 `AppConfig.selected_nodes`（分组完整名称 → 节点完整名称，包含 GLOBAL，缺省空映射）；启动、模式切换、代理刷新及订阅热重载后先恢复选择再读取界面快照。节点仍在组内就使用原节点，缺失时临时选该组显示顺序的第一项，不覆盖原记忆；自动组、空组及已删除分组不操作。同名分组跨配置复用选择，不依赖订阅的 `profile.store-selected` 或内核 cache.db，适用于 Linux TUN 重建 runtime。节点切换/恢复与订阅更新互斥，旧内核结果不写入客户端状态；失败在代理页提示并允许刷新或重新点击重试。
 
 - 代理分组内节点使用统一三列 Grid（GPUI `grid_cols` 对应 `minmax(0, 1fr)`），卡片设置 `min_w_0`，名称在内部截断，节点名称及折叠栏当前节点均通过 GPUI tooltip 悬浮展示完整名称（限定宽度、允许换行）；禁止恢复逐行按内容最小宽度分配的 Flex 布局，以免长名称、测速结果或选中标记导致列错位与横向溢出。末行不足三项时保持列宽，分页按钮位于网格外。分组标题整栏可点击展开/收起，测速按钮必须阻止事件冒泡，避免误触折叠。`docs/examples/proxy-layout-demo.yaml` 提供 35 个假节点的导入验证配置，覆盖长名称、分页与不完整末行；节点测速预期超时，规则模式固定直连。
 

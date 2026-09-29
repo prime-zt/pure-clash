@@ -10,11 +10,15 @@ use anyhow::{Context, Result, bail};
 use serde_yaml::{Mapping, Value};
 use uuid::Uuid;
 
+use super::controller::Mode;
 use crate::platform::AppPaths;
 
 /// 客户端本地基线；保存端口、controller 地址与随机 secret 等本机字段。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct LocalBaseline {
+    /// 用户选择的运行模式（rule/global/direct）；缺失或未知值回退规则模式。
+    /// 保存到 local.yaml，所有订阅合并与内核重启均沿用此选择。
+    pub(crate) mode: Mode,
     /// 本地代理混合监听端口。
     pub(crate) mixed_port: u16,
     /// external controller 监听地址（仅回环）。
@@ -39,6 +43,7 @@ pub(crate) fn ensure_baseline(paths: &AppPaths) -> Result<LocalBaseline> {
     }
 
     let baseline = LocalBaseline {
+        mode: Mode::Rule,
         mixed_port: 7890,
         controller_addr: "127.0.0.1:9097".to_owned(),
         secret: Uuid::new_v4().to_string(),
@@ -79,7 +84,7 @@ impl LocalBaseline {
         set("allow-lan", Value::from(false));
         set("bind-address", Value::from("127.0.0.1"));
         // 行为默认值由客户端控制。
-        set("mode", Value::from("rule"));
+        set("mode", Value::from(self.mode.as_str()));
         set("log-level", Value::from("info"));
         // 统一延迟口径，并让 Mihomo 并发尝试目标 IP；这两个产品默认适用于
         // 内置配置和所有订阅，避免不同配置来源产生不一致的连接行为。
@@ -210,6 +215,12 @@ fn parse_baseline(content: &str) -> Result<LocalBaseline> {
         .is_some_and(|mode| mode.eq_ignore_ascii_case("always"));
 
     Ok(LocalBaseline {
+        mode: Mode::from_str(
+            mapping
+                .get("mode")
+                .and_then(Value::as_str)
+                .unwrap_or("rule"),
+        ),
         mixed_port: mixed_port as u16,
         controller_addr: controller_addr.to_owned(),
         secret: secret.to_owned(),
@@ -370,6 +381,7 @@ mod tests {
 
     fn baseline() -> LocalBaseline {
         LocalBaseline {
+            mode: Mode::Rule,
             mixed_port: 7890,
             controller_addr: "127.0.0.1:9097".to_owned(),
             secret: "test-secret".to_owned(),
@@ -715,6 +727,51 @@ rules:
         let yaml = original.to_yaml();
         let parsed = parse_baseline(&yaml).expect("基线 YAML 应回读");
         assert_eq!(parsed, original);
+    }
+
+    #[test]
+    fn remembered_mode_survives_reload_and_profile_changes() {
+        let root = std::env::temp_dir().join(format!("pure-clash-mode-{}", Uuid::new_v4()));
+        let paths = AppPaths::portable(&root);
+        fs::create_dir_all(&paths.mihomo_config_dir).unwrap();
+
+        // 模拟用户保存后重新启动，重新从磁盘读取，覆盖三种模式及来回切换。
+        for mode in [Mode::Global, Mode::Direct, Mode::Rule] {
+            let mut selected = baseline();
+            selected.mode = mode;
+            save_baseline(&paths, &selected).unwrap();
+            let restored = ensure_baseline(&paths).unwrap();
+            assert_eq!(restored.mode, mode);
+
+            // 默认配置及订阅各自声明的模式都不能覆盖用户选择。
+            for profile in [
+                include_str!("../../config/mihomo/default.yaml"),
+                "mode: rule\nrules:\n- MATCH,DIRECT\n",
+                "mode: global\nrules:\n- MATCH,DIRECT\n",
+                "mode: direct\nrules:\n- MATCH,DIRECT\n",
+            ] {
+                let runtime = merge_runtime(profile, &restored).unwrap();
+                write_runtime(&paths, &runtime).unwrap();
+                let loaded: Value = serde_yaml::from_str(
+                    &fs::read_to_string(&paths.runtime_mihomo_config_file).unwrap(),
+                )
+                .unwrap();
+                assert_eq!(loaded["mode"].as_str(), Some(mode.as_str()));
+            }
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn legacy_or_unknown_baseline_mode_defaults_to_rule() {
+        // 兼容旧基线以及手工编辑的未知值，不影响端口等其他有效设置。
+        for mode in ["", "mode: unknown\n", "mode: null\n"] {
+            let restored = parse_baseline(&format!(
+                "mixed-port: 7890\nexternal-controller: 127.0.0.1:9097\nsecret: test\n{mode}"
+            ))
+            .unwrap();
+            assert_eq!(restored.mode, Mode::Rule);
+        }
     }
 
     #[test]
