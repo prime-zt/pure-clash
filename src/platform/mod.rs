@@ -104,6 +104,11 @@ pub(crate) fn tun_dns_ipv6() -> bool {
     cfg!(target_os = "linux")
 }
 
+/// Windows 严格路由通过 WFP 阻止多网卡并行 DNS 泄露；其他平台保持既有路由策略。
+pub(crate) fn tun_strict_route() -> bool {
+    cfg!(target_os = "windows")
+}
+
 /// Linux 沿用锁定 Mihomo 的默认双栈地址；Windows 保留现有显式 v6 地址，
 /// 确保 Wintun 的 IPv6 默认路由行为不因 Linux 兼容修复而变化。
 pub(crate) fn tun_inet6_address() -> Option<&'static str> {

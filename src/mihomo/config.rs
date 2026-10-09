@@ -109,11 +109,18 @@ impl LocalBaseline {
                 Value::from(crate::platform::tun_stack()),
             );
             tun.insert(Value::from("auto-route"), Value::from(true));
-            tun.insert(Value::from("strict-route"), Value::from(false));
+            tun.insert(
+                Value::from("strict-route"),
+                Value::from(crate::platform::tun_strict_route()),
+            );
             tun.insert(Value::from("auto-detect-interface"), Value::from(true));
             tun.insert(
                 Value::from("dns-hijack"),
-                Value::Sequence(vec![Value::from("any:53")]),
+                // 显式接管两种协议；1.19.30 内核会去掉协议前缀后统一匹配端口。
+                Value::Sequence(vec![
+                    Value::from("udp://any:53"),
+                    Value::from("tcp://any:53"),
+                ]),
             );
             if let Some(address) = crate::platform::tun_inet6_address() {
                 tun.insert(
@@ -123,8 +130,8 @@ impl LocalBaseline {
             }
         }
         set("tun", Value::Mapping(tun));
-        // dns-hijack 会把系统 DNS 全部劫进内核：开启 TUN 时必须由客户端注入
-        // 完整的 fake-ip DNS 配置，否则内核没有上游可查、所有域名解析失败；
+        // dns-hijack 接管经过 TUN 的 53 端口查询（不是所有应用自带的 DoH/DoT）：
+        // 开启 TUN 时注入完整 fake-ip DNS 与上游出站策略；
         // 未开 TUN 时不注入，保留订阅自带的 DNS 配置。
         if self.tun_enable {
             let dns_filter: Vec<Value> = [
@@ -158,15 +165,24 @@ impl LocalBaseline {
                 );
             }
             dns.insert(Value::from("fake-ip-filter"), Value::Sequence(dns_filter));
+            // 普通查询遵循当前模式和上游地址的路由规则，不能在全局代理时仍默认直连。
+            // 使用带有效 IP 证书的 DoH 地址，无需明文 DNS 引导解析上游域名。
+            dns.insert(Value::from("respect-rules"), Value::from(true));
             dns.insert(
                 Value::from("default-nameserver"),
-                Value::Sequence(vec![Value::from("223.5.5.5"), Value::from("119.29.29.29")]),
+                Value::Sequence(vec![Value::from("https://223.5.5.5/dns-query")]),
+            );
+            // 节点服务器域名必须在代理建立前独立解析，不能再经该代理造成递归。
+            // 该直连加密解析器仅用于节点域名，不作为普通查询失败后的降级上游。
+            dns.insert(
+                Value::from("proxy-server-nameserver"),
+                Value::Sequence(vec![Value::from("https://223.5.5.5/dns-query")]),
             );
             dns.insert(
                 Value::from("nameserver"),
                 Value::Sequence(vec![
-                    Value::from("https://doh.pub/dns-query"),
-                    Value::from("https://dns.alidns.com/dns-query"),
+                    Value::from("https://1.1.1.1/dns-query"),
+                    Value::from("https://8.8.8.8/dns-query"),
                 ]),
             );
             set("dns", Value::Mapping(dns));
@@ -571,7 +587,11 @@ proxy-groups:
         assert_eq!(tun.get(Value::from("auto-route")), Some(&Value::from(true)));
         assert_eq!(
             tun.get(Value::from("strict-route")),
-            Some(&Value::from(false))
+            Some(&Value::from(cfg!(target_os = "windows")))
+        );
+        assert_eq!(
+            tun["dns-hijack"],
+            serde_yaml::from_str::<Value>("[udp://any:53, tcp://any:53]").unwrap()
         );
         // 沿用 Mihomo 默认设备名；Linux 与同机 Clash Verge Rev 的工作配置一致。
         assert!(tun.get(Value::from("device")).is_none());
@@ -607,6 +627,16 @@ proxy-groups:
             assert!(dns.get(Value::from("fake-ip-range6")).is_none());
         }
         assert!(dns.get(Value::from("nameserver")).is_some());
+        assert_eq!(dns["respect-rules"], Value::Bool(true));
+        assert_eq!(
+            dns["nameserver"],
+            serde_yaml::from_str::<Value>("[https://1.1.1.1/dns-query, https://8.8.8.8/dns-query]")
+                .unwrap()
+        );
+        assert_eq!(
+            dns["proxy-server-nameserver"],
+            serde_yaml::from_str::<Value>("[https://223.5.5.5/dns-query]").unwrap()
+        );
 
         // 关闭：订阅即使自带 TUN 配置也会被覆盖为禁用。
         let profile = "tun:\n  enable: true\nrules:\n- MATCH,DIRECT";
@@ -624,6 +654,152 @@ proxy-groups:
         // 基线文件序列化往返保留 TUN 开关。
         let roundtrip = parse_baseline(&enabled.to_yaml()).expect("基线往返应成功");
         assert_eq!(roundtrip, enabled);
+    }
+
+    #[test]
+    fn tun_dns_policy_overrides_subscription_but_leaves_non_tun_dns_intact() {
+        // 旧订阅不能关闭 DNS 路由或偷偷加入明文 fallback；退出 TUN 后仍保留订阅配置。
+        let profile = "dns:\n  enable: true\n  respect-rules: false\n  nameserver: [114.114.114.114]\n  fallback: [system]\n  nameserver-policy:\n    '+.example.com': 192.168.1.1\nrules:\n- MATCH,DIRECT\n";
+        for mode in [Mode::Rule, Mode::Global, Mode::Direct] {
+            let mut local = baseline();
+            local.mode = mode;
+            local.tun_enable = true;
+            let merged: Value =
+                serde_yaml::from_str(&merge_runtime(profile, &local).unwrap()).unwrap();
+            assert_eq!(merged["dns"]["respect-rules"], Value::Bool(true));
+            assert!(merged["dns"].get("fallback").is_none());
+            assert!(merged["dns"].get("nameserver-policy").is_none());
+            for key in [
+                "nameserver",
+                "default-nameserver",
+                "proxy-server-nameserver",
+            ] {
+                for server in merged["dns"][key].as_sequence().unwrap() {
+                    let address = server.as_str().unwrap().strip_prefix("https://").unwrap();
+                    let (host, path) = address.split_once('/').unwrap();
+                    assert!(host.parse::<std::net::IpAddr>().is_ok());
+                    assert_eq!(path, "dns-query");
+                }
+            }
+            local.tun_enable = false;
+            let merged: Value =
+                serde_yaml::from_str(&merge_runtime(profile, &local).unwrap()).unwrap();
+            let original: Value = serde_yaml::from_str(profile).unwrap();
+            assert_eq!(merged["dns"], original["dns"]);
+        }
+    }
+
+    #[test]
+    #[ignore = "启动随包 Mihomo 和本地模拟代理验证 DNS 出站；不启用系统 TUN 或访问公网"]
+    fn tun_dns_uses_proxy_and_does_not_fall_back_to_bootstrap() {
+        use crate::mihomo::{MihomoProcess, controller::Controller};
+        use std::{
+            io::{BufRead, BufReader, Write},
+            net::{TcpListener, UdpSocket},
+            time::{Duration, Instant},
+        };
+
+        let root = std::env::temp_dir().join(format!("pure-clash-dns-{}", Uuid::new_v4()));
+        let mut paths = AppPaths::portable(&root);
+        paths.kernel_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("kernel");
+        fs::create_dir_all(&paths.mihomo_config_dir).unwrap();
+        fs::create_dir_all(&paths.mihomo_data_dir).unwrap();
+        let proxy = TcpListener::bind("127.0.0.1:0").unwrap();
+        proxy.set_nonblocking(true).unwrap();
+        let port = proxy.local_addr().unwrap().port();
+        let controller_socket = TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut local = baseline();
+        local.controller_addr = controller_socket.local_addr().unwrap().to_string();
+        drop(controller_socket);
+        local.tun_enable = true;
+        let profile = format!(
+            "proxies:\n- name: DNS-TEST\n  type: http\n  server: 127.0.0.1\n  port: {port}\nrules:\n- MATCH,DNS-TEST\n"
+        );
+        let runtime = merge_runtime(&profile, &local).unwrap();
+        let version = env!("PURE_CLASH_DEFAULT_MIHOMO_VERSION");
+        // 先让锁定内核校验生产 TUN 配置，包含 strict-route 与两种 dns-hijack 协议。
+        validate_kernel_config(&paths, version, &runtime).unwrap();
+        let mut runtime: Value = serde_yaml::from_str(&runtime).unwrap();
+        runtime["tun"]["enable"] = Value::Bool(false);
+        runtime["mixed-port"] = Value::from(0);
+        // 用本地观察端口替换引导解析器，捕获普通查询错误降级或解析循环。
+        let bootstrap = UdpSocket::bind("127.0.0.1:0").unwrap();
+        bootstrap.set_nonblocking(true).unwrap();
+        for key in ["default-nameserver", "proxy-server-nameserver"] {
+            runtime["dns"][key] = Value::Sequence(vec![Value::from(
+                bootstrap.local_addr().unwrap().to_string(),
+            )]);
+        }
+        write_runtime(&paths, &serde_yaml::to_string(&runtime).unwrap()).unwrap();
+        let mut process = MihomoProcess::start(
+            &paths,
+            version,
+            &paths.runtime_mihomo_config_file,
+            false,
+            false,
+        )
+        .unwrap();
+        let controller = Controller::new(&local);
+        for _ in 0..50 {
+            if controller.version().is_ok() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        controller.version().unwrap();
+        controller.select_proxy("GLOBAL", "DNS-TEST").unwrap();
+        for mode in [Mode::Rule, Mode::Global] {
+            controller.patch_mode(mode.as_str()).unwrap();
+            let endpoint = format!("http://{}/dns/query", local.controller_addr);
+            let secret = local.secret.clone();
+            let query = std::thread::spawn(move || {
+                ureq::AgentBuilder::new()
+                    .timeout(Duration::from_secs(12))
+                    .build()
+                    .get(&endpoint)
+                    .set("Authorization", &format!("Bearer {secret}"))
+                    .query("name", &format!("{}.example.com", Uuid::new_v4().simple()))
+                    .query("type", "TXT")
+                    .call()
+            });
+            let mut targets = std::collections::BTreeSet::new();
+            let deadline = Instant::now() + Duration::from_secs(15);
+            while !query.is_finished() && Instant::now() < deadline {
+                match proxy.accept() {
+                    Ok((mut stream, _)) => {
+                        stream
+                            .set_read_timeout(Some(Duration::from_secs(2)))
+                            .unwrap();
+                        let mut reader = BufReader::new(&stream);
+                        let mut request = String::new();
+                        reader.read_line(&mut request).unwrap();
+                        targets.insert(request.split_whitespace().nth(1).unwrap().to_owned());
+                        // 拒绝连接模拟代理不可用，普通 DNS 必须失败而非改走本地解析器。
+                        stream.write_all(b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(10))
+                    }
+                    Err(error) => panic!("模拟代理接收失败：{error}"),
+                }
+            }
+            assert!(query.join().unwrap().is_err(), "代理失败不得静默直连解析");
+            assert_eq!(
+                targets,
+                ["1.1.1.1:443".to_owned(), "8.8.8.8:443".to_owned()]
+                    .into_iter()
+                    .collect(),
+                "{mode:?} 的两个 DoH 上游都应经过代理"
+            );
+            let mut packet = [0u8; 512];
+            assert_eq!(
+                bootstrap.recv(&mut packet).unwrap_err().kind(),
+                std::io::ErrorKind::WouldBlock,
+                "普通查询不得进入引导解析器"
+            );
+        }
+        process.stop().unwrap();
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
